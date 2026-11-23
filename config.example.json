@@ -1,0 +1,21 @@
+{
+  "channels": {
+    "123456789012345678": {
+      "requireMention": true,
+      "allowFrom": ["987654321098765432"]
+    },
+    "234567890123456789": {
+      "requireMention": false,
+      "allowFrom": []
+    }
+  },
+  "dmAllowFrom": ["987654321098765432"],
+  "allowBots": [],
+  "mentionPatterns": ["\\bbot\\b"],
+  "ackReaction": "👀",
+  "replyToMode": "first",
+  "chunkMode": "newline",
+  "textChunkLimit": 2000,
+  "patrolChannels": [],
+  "modeAdmins": ["987654321098765432"]
+}
