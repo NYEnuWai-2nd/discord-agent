@@ -76,7 +76,8 @@ bot の人格やスキル・ルールはリポジトリ本体ではなく、環�
 - `BOT_ACP_COMMAND` の例:
   - Antigravity: `agy acp`
   - Gemini CLI: `gemini --experimental-acp`
-  - Claude Code: `npx @zed-industries/claude-code-acp`
+  - Claude Code: `npx -y @agentclientprotocol/claude-agent-acp`
+  - OpenCode: `opencode acp`
 - Discord に接続せずに疎通だけ確かめるには: `BOT_ACP_COMMAND="agy acp" bun scripts/acp-smoke.ts`
 
 ---
