@@ -49,7 +49,7 @@ bot の人格やスキル・ルールはリポジトリ本体ではなく、環�
 
 ---
 
-## 2 つの頭脳モード（`BOT_BRAIN`）
+## 3 つの頭脳モード（`BOT_BRAIN`）
 
 `BOT_BRAIN` 環境変数で応答を生成する頭脳を切り替えられます。
 
@@ -67,6 +67,18 @@ bot の人格やスキル・ルールはリポジトリ本体ではなく、環�
 - `take.ts --wait <秒>` で待ち受け中は `.state/resident.json` に心拍が記録され、その間の冗長な webhook 通知を省略します。
 - 外部エージェントに与える指示書のひな形は [GEMINI_BRAIN.md](GEMINI_BRAIN.md) を参照してください。
 
+### 3. ACP モード（`BOT_BRAIN=acp`）
+
+- ACP（Agent Client Protocol）対応のエージェントを bot 自身が子プロセスとして起動し、1 つのセッションを開いたまま、着信・巡回ごとに `session/prompt` を直列に送ります（JSON-RPC 2.0 over stdio を自前実装。外部ライブラリ不要）。
+- エージェントは webhook モードと同じく、ローカル HTTP ツールサーバー経由で `scripts/tool.ts` を実行して返信・リアクションを行います。権限確認（`session/request_permission`）には bot が自動で許可を返します。
+- セッション ID は `.state/acp-session.json` に保存され、エージェントが `session/resume` / `session/load` に対応していれば再起動後も会話を引き継ぎます。子プロセスが落ちたら間隔を空けて自動で再起動します。
+- 起動中に `tool.ts list_models` / `set_model` でモデル（エフォート）を切り替えられます（`set_model` は `modeAdmins` のメッセージのみ受け付け、選んだモデルは `.state/acp-model.json` に保存）。
+- `BOT_ACP_COMMAND` の例:
+  - Antigravity: `agy acp`
+  - Gemini CLI: `gemini --experimental-acp`
+  - Claude Code: `npx @zed-industries/claude-code-acp`
+- Discord に接続せずに疎通だけ確かめるには: `BOT_ACP_COMMAND="agy acp" bun scripts/acp-smoke.ts`
+
 ---
 
 ## 環境変数
@@ -75,14 +87,20 @@ bot の人格やスキル・ルールはリポジトリ本体ではなく、環�
 | --- | --- | --- | --- |
 | `DISCORD_BOT_TOKEN` | 必須 | — | Discord ボットのトークン（`smoke.ts` では不要） |
 | `BOT_WORKSPACE` | 必須 | — | エージェントの作業ディレクトリ（存在するディレクトリを指定） |
-| `BOT_BRAIN` | 任意 | `claude` | 頭脳モード（`claude` / `webhook`） |
+| `BOT_BRAIN` | 任意 | `claude` | 頭脳モード（`claude` / `webhook` / `acp`） |
 | `BOT_WEBHOOK_URL` | `webhook` 時必須 | — | `BOT_BRAIN=webhook` 時に起床通知を送る URL |
 | `BOT_MODEL` | 任意 | SDK 既定 | `claude` モードで使用するモデル名 |
 | `BOT_PERMISSION_MODE` | 任意 | `bypassPermissions` | SDK の権限モード（`default` / `acceptEdits` / `bypassPermissions` / `plan` / `dontAsk` / `auto`） |
 | `BOT_STATE_DIR` | 任意 | `.state` | セッション情報・受信添付ファイル・キュー等の保存先 |
 | `BOT_CONFIG` | 任意 | `config.json` | 許可設定 JSON ファイルのパス（変更時は mtime を見て自動再読込） |
 | `BOT_FRESH_SESSION` | 任意 | 未設定 (`0`) | `1` を指定すると初回起動時のみ保存済みセッションを引き継がず新規開始 |
-| `BOT_PATROL_MINUTES` | 任意 | `0` | `webhook` モード時の定期巡回間隔（分）。`0` または未設定で無効、有効時は `1` 以上 |
+| `BOT_PATROL_MINUTES` | 任意 | `0` | `webhook` / `acp` モード時の定期巡回間隔（分）。`0` または未設定で無効、有効時は `1` 以上 |
+| `BOT_ACP_COMMAND` | `acp` 時必須 | — | 子プロセスとして起動する ACP エージェントのコマンド |
+| `BOT_ACP_CWD` | 任意 | `BOT_WORKSPACE` | ACP エージェントの作業ディレクトリ |
+| `BOT_ACP_MODEL` | 任意 | エージェント既定 | 起動時に指定するモデル ID（エージェントが返した一覧にある場合のみ適用） |
+| `BOT_ACP_INSTRUCTIONS` | 任意 | `<repo>/GEMINI_BRAIN.md` | 新規セッションの最初に読ませる指示書の絶対パス |
+| `BOT_ACP_PROMPT_TIMEOUT_SEC` | 任意 | `300` | 1 ターンのタイムアウト秒数（超えたら `session/cancel`） |
+| `BOT_ACP_MAX_TURNS` | 任意 | `200` | セッションを作り直すまでのターン数 |
 
 ---
 

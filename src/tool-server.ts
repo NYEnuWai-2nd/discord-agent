@@ -7,11 +7,17 @@ import type { DiscordTools } from './discord.ts';
 import { toolShapes } from './tool-schemas.ts';
 import { addPerson, notePerson, setState } from './workspace-tools.ts';
 
+export type ModelControl = {
+  requestModel(modelId: string): Promise<string>;
+  getModels(): { current?: string; available: string[] };
+};
+
 export type ToolRequestContext = {
   tools: DiscordTools;
   token: string;
   workspace?: string;
   getConfig?: () => BotConfig;
+  modelControl?: ModelControl;
 };
 
 type ToolHandler = (
@@ -88,6 +94,29 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const workspace = requireWorkspace(ctx);
     return notePerson({ workspace }, args);
   }),
+  list_models: makeHandler(z.object(toolShapes.list_models), async (ctx) => {
+    if (!ctx.modelControl) {
+      throw new Error('ACP モードでのみ使えます');
+    }
+    const { current, available } = ctx.modelControl.getModels();
+    const currentText = current ?? '(未設定)';
+    const availableText = available.length > 0 ? available.join(', ') : '(不明)';
+    return `現在: ${currentText}\n使えるもの: ${availableText}`;
+  }),
+  set_model: makeHandler(z.object(toolShapes.set_model), async (ctx, args) => {
+    if (!ctx.modelControl) {
+      throw new Error('ACP モードでのみ使えます');
+    }
+    if (!ctx.getConfig) {
+      throw new Error('config が設定されていません');
+    }
+    const { authorId } = await ctx.tools.getMessageAuthor(args.chat_id, args.message_id);
+    const cfg = ctx.getConfig();
+    if (!cfg.modeAdmins.includes(authorId)) {
+      throw new Error('切り替え権限がありません');
+    }
+    return ctx.modelControl.requestModel(args.model);
+  }),
 };
 
 /** Bearer トークンを定数時間で照合する */
@@ -158,6 +187,7 @@ export function startToolServer(opts: {
   stateDir: string;
   workspace: string;
   getConfig: () => BotConfig;
+  modelControl?: ModelControl;
 }): { port: number; stop(): void } {
   const token = randomBytes(32).toString('hex');
   const server = Bun.serve({
@@ -169,6 +199,7 @@ export function startToolServer(opts: {
         token,
         workspace: opts.workspace,
         getConfig: opts.getConfig,
+        modelControl: opts.modelControl,
       });
     },
   });

@@ -125,5 +125,25 @@ describe('parseToolArgs', () => {
     expect(HELP_TEXT).toContain('set_state');
     expect(HELP_TEXT).toContain('add_person');
     expect(HELP_TEXT).toContain('note_person');
+
+    const listModelsArgs = parseToolArgs(['list_models']);
+    expect(listModelsArgs).toEqual({ name: 'list_models', args: {} });
+
+    const setModelArgs = parseToolArgs([
+      'set_model',
+      '--chat_id',
+      '111',
+      '--message_id',
+      '222',
+      '--model',
+      'gemini-4-hydrogen-high',
+    ]);
+    expect(setModelArgs).toEqual({
+      name: 'set_model',
+      args: { chat_id: '111', message_id: '222', model: 'gemini-4-hydrogen-high' },
+    });
+
+    expect(HELP_TEXT).toContain('list_models');
+    expect(HELP_TEXT).toContain('set_model');
   });
 });

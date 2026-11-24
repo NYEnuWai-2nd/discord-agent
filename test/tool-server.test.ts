@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseConfig, type BotConfig } from '../src/config.ts';
 import type { DiscordTools } from '../src/discord.ts';
-import { handleToolRequest, type ToolRequestContext } from '../src/tool-server.ts';
+import { handleToolRequest, type ModelControl, type ToolRequestContext } from '../src/tool-server.ts';
 
 type RecordedCall = {
   method: keyof DiscordTools;
@@ -68,7 +68,7 @@ const TEST_TOKEN = 'secret-test-token-0123456789abcdef';
 
 function makeCtx(
   tools: DiscordTools,
-  extra: { workspace?: string; config?: Partial<BotConfig> } = {},
+  extra: { workspace?: string; config?: Partial<BotConfig>; modelControl?: ModelControl } = {},
 ): ToolRequestContext {
   const cfg = parseConfig(extra.config ?? {});
   return {
@@ -76,6 +76,7 @@ function makeCtx(
     token: TEST_TOKEN,
     workspace: extra.workspace,
     getConfig: () => cfg,
+    ...(extra.modelControl ? { modelControl: extra.modelControl } : {}),
   };
 }
 
@@ -351,5 +352,90 @@ describe('handleToolRequest', () => {
       ok: false,
       error: 'workspace が設定されていません',
     });
+  });
+
+  test('list_models と set_model が ACP モードで動作し、権限不足や非 ACP モードを拒否する', async () => {
+    const { tools } = createFakeTools();
+
+    // 非 ACP モード（modelControl 無し）はエラー
+    const nonAcpList = await handleToolRequest(
+      makeRequest('/tool/list_models', { body: JSON.stringify({}) }),
+      makeCtx(tools),
+    );
+    expect(nonAcpList.status).toBe(200);
+    expect(await nonAcpList.json()).toEqual({
+      ok: false,
+      error: 'ACP モードでのみ使えます',
+    });
+
+    const nonAcpSet = await handleToolRequest(
+      makeRequest('/tool/set_model', {
+        body: JSON.stringify({ chat_id: '111', message_id: '222', model: 'gemini-4-hydrogen-high' }),
+      }),
+      makeCtx(tools),
+    );
+    expect(nonAcpSet.status).toBe(200);
+    expect(await nonAcpSet.json()).toEqual({
+      ok: false,
+      error: 'ACP モードでのみ使えます',
+    });
+
+    const requested: string[] = [];
+    let current = 'gemini-4-hydrogen-low';
+    const modelControl: ModelControl = {
+      getModels: () => ({
+        current,
+        available: ['gemini-4-hydrogen-low', 'gemini-4-hydrogen-high'],
+      }),
+      requestModel: async (modelId) => {
+        requested.push(modelId);
+        current = modelId;
+        return `モデルを ${modelId} に切り替えました`;
+      },
+    };
+
+    // list_models 正常系
+    const listRes = await handleToolRequest(
+      makeRequest('/tool/list_models', { body: JSON.stringify({}) }),
+      makeCtx(tools, { modelControl }),
+    );
+    expect(listRes.status).toBe(200);
+    expect(await listRes.json()).toEqual({
+      ok: true,
+      result: '現在: gemini-4-hydrogen-low\n使えるもの: gemini-4-hydrogen-low, gemini-4-hydrogen-high',
+    });
+
+    // set_model 権限不足（送信者が modeAdmins に含まれない）
+    const { tools: nonAdminTools } = createFakeTools({
+      async getMessageAuthor() {
+        return { authorId: '999999999', content: 'change model' };
+      },
+    });
+    const deniedRes = await handleToolRequest(
+      makeRequest('/tool/set_model', {
+        body: JSON.stringify({ chat_id: '111', message_id: '222', model: 'gemini-4-hydrogen-high' }),
+      }),
+      makeCtx(nonAdminTools, { config: { modeAdmins: ['111222333444555666'] }, modelControl }),
+    );
+    expect(deniedRes.status).toBe(200);
+    expect(await deniedRes.json()).toEqual({
+      ok: false,
+      error: '切り替え権限がありません',
+    });
+    expect(requested).toEqual([]);
+
+    // set_model 権限あり正常系
+    const okRes = await handleToolRequest(
+      makeRequest('/tool/set_model', {
+        body: JSON.stringify({ chat_id: '111', message_id: '222', model: 'gemini-4-hydrogen-high' }),
+      }),
+      makeCtx(tools, { config: { modeAdmins: ['111222333444555666'] }, modelControl }),
+    );
+    expect(okRes.status).toBe(200);
+    expect(await okRes.json()).toEqual({
+      ok: true,
+      result: 'モデルを gemini-4-hydrogen-high に切り替えました',
+    });
+    expect(requested).toEqual(['gemini-4-hydrogen-high']);
   });
 });

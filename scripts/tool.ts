@@ -25,6 +25,8 @@ export const HELP_TEXT = [
   '  set_state            --chat_id <id> --message_id <id> --key <key> --value <value>',
   '  add_person           --name <name> --user_id <id|不明> --description <text>',
   '  note_person          --user_id <id> --note <text>',
+  '  list_models',
+  '  set_model            --chat_id <id> --message_id <id> --model <model_id>',
 ].join('\n');
 
 /**

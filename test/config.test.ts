@@ -2,7 +2,14 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { convertAccessJson, loadConfig, loadEnv, parseConfig } from '../src/config.ts'
+import {
+  convertAccessJson,
+  loadAcpEnv,
+  loadConfig,
+  loadEnv,
+  parseConfig,
+  resolveBrainKind,
+} from '../src/config.ts'
 
 const tempDirs: string[] = []
 
@@ -383,5 +390,53 @@ describe('loadEnv', () => {
         }),
       ).toThrow(/BOT_PATROL_MINUTES/)
     }
+  })
+})
+
+describe('resolveBrainKind / loadAcpEnv', () => {
+  test('BOT_BRAIN の解決と不正値エラー', () => {
+    expect(resolveBrainKind({})).toBe('claude')
+    expect(resolveBrainKind({ BOT_BRAIN: 'webhook' })).toBe('webhook')
+    expect(resolveBrainKind({ BOT_BRAIN: 'acp' })).toBe('acp')
+    expect(() => resolveBrainKind({ BOT_BRAIN: 'unknown' })).toThrow(/BOT_BRAIN/)
+  })
+
+  test('loadAcpEnv の必須チェックと既定値・境界チェック', () => {
+    const workspaceDir = makeTempDir('discord-agent-acp-ws-')
+    expect(() => loadAcpEnv(workspaceDir, {})).toThrow(/BOT_ACP_COMMAND/)
+
+    const cfg = loadAcpEnv(workspaceDir, { BOT_ACP_COMMAND: 'agy acp' })
+    expect(cfg.command).toBe('agy acp')
+    expect(cfg.cwd).toBe(workspaceDir)
+    expect(cfg.instructionsPath.endsWith('/GEMINI_BRAIN.md')).toBe(true)
+    expect(cfg.instructionsPath.includes('\\')).toBe(false)
+    expect(cfg.model).toBeUndefined()
+    expect(cfg.promptTimeoutSec).toBe(300)
+    expect(cfg.maxTurns).toBe(200)
+
+    const custom = loadAcpEnv(workspaceDir, {
+      BOT_ACP_COMMAND: 'gemini --experimental-acp',
+      BOT_ACP_CWD: workspaceDir,
+      BOT_ACP_MODEL: 'gemini-2.5-pro',
+      BOT_ACP_PROMPT_TIMEOUT_SEC: '120',
+      BOT_ACP_MAX_TURNS: '50',
+    })
+    expect(custom.model).toBe('gemini-2.5-pro')
+    expect(custom.promptTimeoutSec).toBe(120)
+    expect(custom.maxTurns).toBe(50)
+
+    expect(() =>
+      loadAcpEnv(workspaceDir, {
+        BOT_ACP_COMMAND: 'agy acp',
+        BOT_ACP_PROMPT_TIMEOUT_SEC: '0',
+      }),
+    ).toThrow(/BOT_ACP_PROMPT_TIMEOUT_SEC/)
+
+    expect(() =>
+      loadAcpEnv(workspaceDir, {
+        BOT_ACP_COMMAND: 'agy acp',
+        BOT_ACP_MAX_TURNS: '1.5',
+      }),
+    ).toThrow(/BOT_ACP_MAX_TURNS/)
   })
 })

@@ -181,6 +181,19 @@ export type Env = {
   patrolMinutes: number;
 };
 
+/** 頭脳モード */
+export type BrainKind = 'claude' | 'webhook' | 'acp';
+
+/** ACP モード用の解決済み設定 */
+export type AcpEnv = {
+  command: string;
+  cwd: string;
+  instructionsPath: string;
+  model?: string;
+  promptTimeoutSec: number;
+  maxTurns: number;
+};
+
 const VALID_PERMISSION_MODES: readonly PermissionMode[] = [
   'default',
   'acceptEdits',
@@ -253,5 +266,77 @@ export function loadEnv(env: Record<string, string | undefined> = process.env): 
     configPath,
     fresh,
     patrolMinutes,
+  };
+}
+
+/**
+ * BOT_BRAIN の値を解決する（省略時は 'claude'）。
+ */
+export function resolveBrainKind(env: Record<string, string | undefined> = process.env): BrainKind {
+  const raw = env.BOT_BRAIN?.trim() || 'claude';
+  if (raw === 'claude' || raw === 'webhook' || raw === 'acp') {
+    return raw;
+  }
+  throw new Error(`Invalid BOT_BRAIN "${raw}". Expected one of: claude, webhook, acp`);
+}
+
+/**
+ * BOT_BRAIN=acp 用の環境変数を検証・解決して返す。
+ */
+export function loadAcpEnv(
+  workspace: string,
+  env: Record<string, string | undefined> = process.env,
+): AcpEnv {
+  const command = env.BOT_ACP_COMMAND?.trim();
+  if (!command) {
+    throw new Error('BOT_BRAIN=acp には BOT_ACP_COMMAND が必要です');
+  }
+
+  const rawCwd = env.BOT_ACP_CWD?.trim();
+  const cwd = rawCwd ? resolve(REPO_ROOT, rawCwd) : workspace;
+  let isDir = false;
+  try {
+    isDir = statSync(cwd).isDirectory();
+  } catch {
+    isDir = false;
+  }
+  if (!isDir) {
+    throw new Error(`BOT_ACP_CWD is not an existing directory: ${cwd}`);
+  }
+
+  const rawInstructions = env.BOT_ACP_INSTRUCTIONS?.trim();
+  const instructionsPath = (
+    rawInstructions ? resolve(REPO_ROOT, rawInstructions) : resolve(REPO_ROOT, 'GEMINI_BRAIN.md')
+  ).replace(/\\/g, '/');
+
+  const model = env.BOT_ACP_MODEL?.trim() || undefined;
+
+  let promptTimeoutSec = 300;
+  const rawTimeout = env.BOT_ACP_PROMPT_TIMEOUT_SEC?.trim();
+  if (rawTimeout) {
+    const parsed = Number(rawTimeout);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(`Invalid BOT_ACP_PROMPT_TIMEOUT_SEC "${rawTimeout}": must be > 0`);
+    }
+    promptTimeoutSec = parsed;
+  }
+
+  let maxTurns = 200;
+  const rawMaxTurns = env.BOT_ACP_MAX_TURNS?.trim();
+  if (rawMaxTurns) {
+    const parsed = Number(rawMaxTurns);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      throw new Error(`Invalid BOT_ACP_MAX_TURNS "${rawMaxTurns}": must be an integer >= 1`);
+    }
+    maxTurns = parsed;
+  }
+
+  return {
+    command,
+    cwd,
+    instructionsPath,
+    ...(model !== undefined ? { model } : {}),
+    promptTimeoutSec,
+    maxTurns,
   };
 }

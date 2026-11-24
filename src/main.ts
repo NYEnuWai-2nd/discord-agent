@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createAcpBrain, type AcpBrain } from './acp-brain.ts';
 import { runAgentForever } from './agent.ts';
-import { loadConfig, loadEnv, type Env } from './config.ts';
+import { loadAcpEnv, loadConfig, loadEnv, resolveBrainKind, type AcpEnv, type BrainKind, type Env } from './config.ts';
 import { createDiscord } from './discord.ts';
 import { Inbox } from './inbox.ts';
 import { hasPendingPatrol, startPatrol } from './patrol.ts';
@@ -51,6 +52,7 @@ async function main(): Promise<void> {
 
   let toolServer: { port: number; stop(): void } | undefined;
   let patrol: { stop(): void } | undefined;
+  let acpBrain: AcpBrain | undefined;
   let shuttingDown = false;
   const shutdown = (signal: string) => {
     if (shuttingDown) return;
@@ -63,6 +65,7 @@ async function main(): Promise<void> {
     }, 2_000);
     forceTimer.unref();
 
+    acpBrain?.stop();
     patrol?.stop();
     toolServer?.stop();
     void discord.destroy().finally(() => {
@@ -81,11 +84,31 @@ async function main(): Promise<void> {
   });
 
   // BOT_BRAIN=webhook: 頭脳を呼ばず、受信内容と直近の履歴を webhook に転送する（T3 Code の予約タスク経由で Gemini が返す試作）
-  const brain = process.env.BOT_BRAIN?.trim() || 'claude';
+  // BOT_BRAIN=acp: 汎用 ACP エージェントを子プロセス起動し、単一セッションへ直列に prompt を送る
+  let brain: BrainKind;
+  try {
+    brain = resolveBrainKind();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`${jstPrefix()} 環境設定エラー: ${msg}`);
+    process.exit(1);
+  }
+
   const webhookUrl = process.env.BOT_WEBHOOK_URL?.trim();
   if (brain === 'webhook' && !webhookUrl) {
     console.error(`${jstPrefix()} 環境設定エラー: BOT_BRAIN=webhook には BOT_WEBHOOK_URL が必要です`);
     process.exit(1);
+  }
+
+  let acpEnv: AcpEnv | undefined;
+  if (brain === 'acp') {
+    try {
+      acpEnv = loadAcpEnv(env.workspace);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`${jstPrefix()} 環境設定エラー: ${msg}`);
+      process.exit(1);
+    }
   }
 
   const pendingDir = join(env.stateDir, 'pending');
@@ -128,7 +151,7 @@ async function main(): Promise<void> {
   discord.onInbound((text, chatId) => {
     const firstLine = (text.split(/\r?\n/, 1)[0] ?? '').slice(0, 200);
     console.log(`${jstPrefix()} 受信: ${firstLine}`);
-    if (brain !== 'webhook') {
+    if (brain === 'claude') {
       inbox.push(text);
       return;
     }
@@ -147,6 +170,14 @@ async function main(): Promise<void> {
       } catch (err) {
         console.error(`${jstPrefix()} 履歴の取得に失敗:`, err);
       }
+      if (brain === 'acp') {
+        if (!acpBrain) {
+          discord.stopTyping();
+          return;
+        }
+        acpBrain.enqueue({ kind: 'inbound', inbound: text, history });
+        return;
+      }
       // T3 の予約タスクは webhook の本文をプロンプトに入れないので、受信内容はファイルに置き、
       // webhook は「起きろ」の合図だけにする。Gemini は scripts/take.ts で 1 件ずつ取り出す。
       const id = `${Date.now()}-${messageId ?? 'unknown'}`;
@@ -161,14 +192,44 @@ async function main(): Promise<void> {
   console.log(`${jstPrefix()} Discord 接続: ${discord.client.user?.tag ?? 'unknown'}`);
 
   console.log(`${jstPrefix()} 頭脳: ${brain}`);
-  if (brain === 'webhook') {
+  if (brain === 'webhook' || brain === 'acp') {
     toolServer = startToolServer({
       tools: discord.tools,
       stateDir: env.stateDir,
       workspace: env.workspace,
       getConfig: () => loadConfig(env.configPath),
+      ...(brain === 'acp'
+        ? {
+            modelControl: {
+              requestModel: (modelId) => {
+                if (!acpBrain) throw new Error('ACP brain が初期化されていません');
+                return acpBrain.requestModel(modelId);
+              },
+              getModels: () => {
+                if (!acpBrain) throw new Error('ACP brain が初期化されていません');
+                return acpBrain.getModels();
+              },
+            },
+          }
+        : {}),
     });
     console.log(`${jstPrefix()} ツールサーバー: 127.0.0.1:${toolServer.port}`);
+
+    if (brain === 'acp' && acpEnv) {
+      acpBrain = createAcpBrain({
+        command: acpEnv.command,
+        cwd: acpEnv.cwd,
+        stateDir: env.stateDir,
+        model: acpEnv.model,
+        instructionsPath: acpEnv.instructionsPath,
+        promptTimeoutSec: acpEnv.promptTimeoutSec,
+        maxTurns: acpEnv.maxTurns,
+        fresh: env.fresh,
+        log: (msg) => console.log(`${jstPrefix()} ${msg}`),
+        onTurnEnd: () => discord.stopTyping(),
+      });
+    }
+
     if (env.patrolMinutes > 0) {
       console.log(`${jstPrefix()} 巡回: 有効 (${env.patrolMinutes} 分間隔)`);
       patrol = startPatrol({
@@ -177,6 +238,15 @@ async function main(): Promise<void> {
         fetchSnapshot: (channelId) => discord.fetchSnapshot(channelId),
         handled,
         enqueue: async (channels) => {
+          if (brain === 'acp') {
+            if (!acpBrain) return;
+            if (acpBrain.hasPendingPatrol()) {
+              console.log(`${jstPrefix()} 巡回: 未処理の patrol が残っているためスキップ`);
+              return;
+            }
+            acpBrain.enqueue({ kind: 'patrol', channels });
+            return;
+          }
           if (hasPendingPatrol(pendingDir)) {
             console.log(`${jstPrefix()} 巡回: 未処理の patrol が残っているためスキップ`);
             return;
@@ -189,7 +259,6 @@ async function main(): Promise<void> {
     } else {
       console.log(`${jstPrefix()} 巡回: 無効`);
     }
-    // 頭脳は外部（webhook の先）。Discord の受信だけを続ける
     return;
   }
 

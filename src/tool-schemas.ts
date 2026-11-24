@@ -58,4 +58,10 @@ export const toolShapes = {
     user_id: z.string().describe('Numeric Discord account ID'),
     note: z.string().describe('Note to append to description (single line, max 150 chars)'),
   },
+  list_models: {},
+  set_model: {
+    chat_id: z.string().describe('Discord channel ID where the instruction message was sent'),
+    message_id: z.string().describe('Discord message ID instructing the model change'),
+    model: z.string().describe('Target model ID to switch to'),
+  },
 };
