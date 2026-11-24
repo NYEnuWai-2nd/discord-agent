@@ -53,14 +53,18 @@ afterEach(() => {
 });
 
 describe('formatAcpPrompt', () => {
-  test('inbound と patrol を take.ts と同じ形式に整形し、初回のみ先頭案内を付ける', () => {
+  test('inbound と patrol と journal を整形し、初回のみ新案内・状態ファイルを付ける', () => {
     const inboundWithIntro = formatAcpPrompt(
       { kind: 'inbound', inbound: '<channel>hi</channel>', history: '[t] a: hi' },
       'C:/repo/GEMINI_BRAIN.md',
       true,
+      'ペルソナ: テスト\n',
     );
     expect(inboundWithIntro).toStartWith(
-      '最初に C:/repo/GEMINI_BRAIN.md を読み、ACP モードの節に従うこと。',
+      '最初に C:/repo/GEMINI_BRAIN.md を読み、ACP モードの節に従うこと。現在の状態は各発言の先頭に添付されるので、現在の状態.md を読み直す必要はない。',
+    );
+    expect(inboundWithIntro).toContain(
+      '=== 現在の状態（bot が添付。読み直し不要） ===\nペルソナ: テスト',
     );
     expect(inboundWithIntro).toContain('=== inbound ===\n<channel>hi</channel>');
     expect(inboundWithIntro).toContain('=== history（古い順。me は bot 自身） ===\n[t] a: hi');
@@ -107,6 +111,53 @@ describe('formatAcpPrompt', () => {
       ].join('\n'),
     );
   });
+
+  test('複数 inbound まとめは番号付きになり、連続する同一 chat_id は最後の件にだけ history を付ける', () => {
+    const batched = formatAcpPrompt(
+      [
+        {
+          kind: 'inbound',
+          chatId: 'chA',
+          inbound: '<channel chat_id="chA" message_id="1">m1</channel>',
+          history: 'hist-A1',
+        },
+        {
+          kind: 'inbound',
+          chatId: 'chA',
+          inbound: '<channel chat_id="chA" message_id="2">m2</channel>',
+          history: 'hist-A2',
+        },
+        {
+          kind: 'inbound',
+          inbound: '<channel chat_id="chB" message_id="3">m3</channel>',
+          history: 'hist-B1',
+        },
+      ],
+      'C:/repo/GEMINI_BRAIN.md',
+      false,
+      'ペルソナ: 標準\n',
+    );
+    expect(batched).toBe(
+      [
+        '=== 現在の状態（bot が添付。読み直し不要） ===',
+        'ペルソナ: 標準',
+        '',
+        '=== inbound 1/3 ===',
+        '<channel chat_id="chA" message_id="1">m1</channel>',
+        '=== inbound 2/3 ===',
+        '<channel chat_id="chA" message_id="2">m2</channel>',
+        '=== history（古い順。me は bot 自身） ===',
+        'hist-A2',
+        '=== inbound 3/3 ===',
+        '<channel chat_id="chB" message_id="3">m3</channel>',
+        '=== history（古い順。me は bot 自身） ===',
+        'hist-B1',
+        '',
+        '上の各メッセージについて、指示書の手順に従ってそれぞれ判断し、返すものは tool.ts で個別に（各 message_id を --reply_to に付けて）返す。返さないものには何もしない。最終回答は 1 行でよい。',
+      ].join('\n'),
+    );
+    expect(batched).not.toContain('hist-A1');
+  });
 });
 
 describe('createAcpBrain', () => {
@@ -129,10 +180,19 @@ describe('createAcpBrain', () => {
     });
 
     try {
-      brain.enqueue({ kind: 'inbound', inbound: 'msg-1 TRIGGER_DELAY:60', history: 'h1' });
-      brain.enqueue({ kind: 'inbound', inbound: 'msg-2', history: 'h2' });
-      brain.enqueue({ kind: 'patrol', channels: [{ chatId: 'ch1', history: 'h3' }] });
+      brain.enqueue({ kind: 'inbound', inbound: 'msg-1', history: 'h1' });
+      await waitFor(() => turnEnds === 1);
 
+      brain.enqueue({ kind: 'inbound', inbound: 'msg-2 TRIGGER_DELAY:120', history: 'h2' });
+      await waitFor(() =>
+        readFakeLog(logFile).some(
+          (e) =>
+            e.kind === 'received' &&
+            e.msg.method === 'session/prompt' &&
+            (e.msg.params?.prompt?.[0]?.text ?? '').includes('msg-2'),
+        ),
+      );
+      brain.enqueue({ kind: 'patrol', channels: [{ chatId: 'ch1', history: 'h3' }] });
       expect(brain.hasPendingPatrol()).toBe(true);
 
       await waitFor(() => turnEnds === 3);
@@ -144,7 +204,9 @@ describe('createAcpBrain', () => {
         .map((e) => e.msg.params?.prompt?.[0]?.text ?? '');
 
       expect(prompts.length).toBe(3);
-      expect(prompts[0]).toContain('最初に C:/repo/GEMINI_BRAIN.md を読み');
+      expect(prompts[0]).toContain(
+        '最初に C:/repo/GEMINI_BRAIN.md を読み、ACP モードの節に従うこと。現在の状態は各発言の先頭に添付されるので、現在の状態.md を読み直す必要はない。',
+      );
       expect(prompts[0]).toContain('msg-1');
       expect(prompts[1]).not.toContain('最初に C:/repo/GEMINI_BRAIN.md を読み');
       expect(prompts[1]).toContain('msg-2');
@@ -176,6 +238,7 @@ describe('createAcpBrain', () => {
 
     try {
       brain.enqueue({ kind: 'inbound', inbound: 'turn-1', history: '' });
+      await waitFor(() => turnEnds === 1);
       brain.enqueue({ kind: 'inbound', inbound: 'turn-2', history: '' });
       await waitFor(() => turnEnds === 2);
 
@@ -229,14 +292,14 @@ describe('createAcpBrain', () => {
     try {
       // 1 件目で意図的にクラッシュさせる
       brain.enqueue({ kind: 'inbound', inbound: 'TRIGGER_CRASH', history: '' });
-      // クラッシュ直後の再起動待ち中に 4 件積む（上限 3 なので最古の drop-me が捨てられる）
+      // クラッシュ直後の再起動待ち中に 4 件積む（上限 3 なので最古の drop-me が捨てられ、残り 3 件が 1 ターンにまとまる）
       await waitFor(() => turnEnds === 1);
       brain.enqueue({ kind: 'inbound', inbound: 'drop-me', history: '' });
       brain.enqueue({ kind: 'inbound', inbound: 'keep-1', history: '' });
       brain.enqueue({ kind: 'inbound', inbound: 'keep-2', history: '' });
       brain.enqueue({ kind: 'inbound', inbound: 'keep-3', history: '' });
 
-      await waitFor(() => turnEnds === 4);
+      await waitFor(() => turnEnds === 2);
 
       const promptTexts = readFakeLog(logFile)
         .filter((e) => e.kind === 'received' && e.msg.method === 'session/prompt')
@@ -443,6 +506,309 @@ describe('createAcpBrain', () => {
       expect(prompts.some((t) => t.includes('ignored-after-close'))).toBe(false);
     } finally {
       await brain.stop();
+    }
+  });
+
+  test('優先順（inbound → journal → patrol）で処理し、inbound 待ち中は patrol を破棄する', async () => {
+    const dir = makeTempDir();
+    const stateDir = path.join(dir, 'state');
+    const logFile = path.join(dir, 'fake.jsonl');
+    process.env.FAKE_ACP_LOG_FILE = logFile;
+
+    let turnEnds = 0;
+    const logs: string[] = [];
+    const brain = createAcpBrain({
+      command: `bun "${FIXTURE_PATH}"`,
+      cwd: dir,
+      stateDir,
+      instructionsPath: 'C:/repo/GEMINI_BRAIN.md',
+      log: (m) => logs.push(m),
+      onTurnEnd: () => {
+        turnEnds += 1;
+      },
+    });
+
+    try {
+      // 1. ターン 1 処理中に patrol → journal の順で積むと journal が先に処理される
+      brain.enqueue({ kind: 'inbound', inbound: 'init-1 TRIGGER_DELAY:150', history: '' });
+      await waitFor(() =>
+        readFakeLog(logFile).some(
+          (e) =>
+            e.kind === 'received' &&
+            e.msg.method === 'session/prompt' &&
+            (e.msg.params?.prompt?.[0]?.text ?? '').includes('init-1'),
+        ),
+      );
+      brain.enqueue({ kind: 'patrol', channels: [{ chatId: 'p1', history: 'patrol-1' }] });
+      brain.enqueue({
+        kind: 'journal',
+        reason: 'daily',
+        date: '2026-11-24',
+        since: '2026-11-23T15:00:00.000Z',
+        channels: [{ chatId: 'j1', history: '[2026-11-24T01:00:00.000Z] alice: j1  (id: 1)' }],
+      });
+      await waitFor(() => turnEnds === 3);
+
+      // 2. ターン 4 処理中に patrol → inbound → patrol → journal の順で積む:
+      //    inbound 到着時に既存の patrol が破棄され、inbound 待ち中の patrol も破棄され、inbound → journal の順で処理される
+      brain.enqueue({ kind: 'inbound', inbound: 'init-2 TRIGGER_DELAY:150', history: '' });
+      await waitFor(() =>
+        readFakeLog(logFile).some(
+          (e) =>
+            e.kind === 'received' &&
+            e.msg.method === 'session/prompt' &&
+            (e.msg.params?.prompt?.[0]?.text ?? '').includes('init-2'),
+        ),
+      );
+      brain.enqueue({ kind: 'patrol', channels: [{ chatId: 'p2', history: 'patrol-dropped-1' }] });
+      expect(brain.hasPendingPatrol()).toBe(true);
+      brain.enqueue({ kind: 'inbound', inbound: 'urgent-mention', history: 'hu' });
+      expect(brain.hasPendingPatrol()).toBe(false);
+      brain.enqueue({ kind: 'patrol', channels: [{ chatId: 'p3', history: 'patrol-dropped-2' }] });
+      expect(brain.hasPendingPatrol()).toBe(false);
+      brain.enqueue({
+        kind: 'journal',
+        reason: 'shutdown',
+        date: '2026-11-24',
+        since: '2026-11-23T15:00:00.000Z',
+        channels: [{ chatId: 'j2', history: '[2026-11-24T02:00:00.000Z] bob: j2  (id: 2)' }],
+      });
+
+      await waitFor(() => turnEnds === 6);
+
+      const prompts = readFakeLog(logFile)
+        .filter((e) => e.kind === 'received' && e.msg.method === 'session/prompt')
+        .map((e) => e.msg.params?.prompt?.[0]?.text ?? '');
+
+      expect(prompts.length).toBe(6);
+      expect(prompts[1]).toContain('=== journal ===');
+      expect(prompts[2]).toContain('=== patrol ===');
+      expect(prompts[4]).toContain('urgent-mention');
+      expect(prompts[5]).toContain('=== journal ===');
+      expect(prompts.some((t) => t.includes('patrol-dropped-1'))).toBe(false);
+      expect(prompts.some((t) => t.includes('patrol-dropped-2'))).toBe(false);
+      expect(logs.filter((l) => l === '巡回: メンション待ちのため破棄').length).toBe(2);
+    } finally {
+      await brain.stop();
+    }
+  });
+
+  test('複数 inbound は最大 5 件まで 1 ターンにまとめ、maxTurns も 1 ターンとして数える', async () => {
+    const dir = makeTempDir();
+    const stateDir = path.join(dir, 'state');
+    const logFile = path.join(dir, 'fake.jsonl');
+    process.env.FAKE_ACP_LOG_FILE = logFile;
+
+    let turnEnds = 0;
+    const logs: string[] = [];
+    const brain = createAcpBrain({
+      command: `bun "${FIXTURE_PATH}"`,
+      cwd: dir,
+      stateDir,
+      instructionsPath: 'C:/repo/GEMINI_BRAIN.md',
+      maxTurns: 3,
+      log: (m) => logs.push(m),
+      onTurnEnd: () => {
+        turnEnds += 1;
+      },
+    });
+
+    try {
+      brain.enqueue({ kind: 'inbound', inbound: 'turn-1 TRIGGER_DELAY:150', history: '' });
+      await waitFor(() =>
+        readFakeLog(logFile).some(
+          (e) =>
+            e.kind === 'received' &&
+            e.msg.method === 'session/prompt' &&
+            (e.msg.params?.prompt?.[0]?.text ?? '').includes('turn-1'),
+        ),
+      );
+
+      // 6 件積む: 先頭 5 件が 1 ターンにまとまり、6 件目は次ターンになる
+      brain.enqueue({
+        kind: 'inbound',
+        chatId: 'chA',
+        inbound: '<channel chat_id="chA" message_id="1">b1</channel>',
+        history: 'hist-1',
+      });
+      brain.enqueue({
+        kind: 'inbound',
+        chatId: 'chA',
+        inbound: '<channel chat_id="chA" message_id="2">b2</channel>',
+        history: 'hist-2',
+      });
+      brain.enqueue({
+        kind: 'inbound',
+        chatId: 'chA',
+        inbound: '<channel chat_id="chA" message_id="3">b3</channel>',
+        history: 'hist-3',
+      });
+      brain.enqueue({
+        kind: 'inbound',
+        chatId: 'chB',
+        inbound: '<channel chat_id="chB" message_id="4">b4</channel>',
+        history: 'hist-4',
+      });
+      brain.enqueue({
+        kind: 'inbound',
+        chatId: 'chA',
+        inbound: '<channel chat_id="chA" message_id="5">b5</channel>',
+        history: 'hist-5',
+      });
+      brain.enqueue({
+        kind: 'inbound',
+        chatId: 'chC',
+        inbound: '<channel chat_id="chC" message_id="6">b6</channel>',
+        history: 'hist-6',
+      });
+
+      await waitFor(() => turnEnds === 3);
+
+      const promptEntries = readFakeLog(logFile).filter(
+        (e) => e.kind === 'received' && e.msg.method === 'session/prompt',
+      );
+      expect(promptEntries.length).toBe(3);
+      // 3 ターン目（b6）までは同じセッションのまま（5 件まとめが 1 ターン扱い）
+      expect(promptEntries[0]!.sessionId).toBe(promptEntries[1]!.sessionId);
+      expect(promptEntries[1]!.sessionId).toBe(promptEntries[2]!.sessionId);
+
+      const batchPrompt = promptEntries[1]!.msg.params?.prompt?.[0]?.text ?? '';
+      expect(batchPrompt).toContain('=== inbound 1/5 ===');
+      expect(batchPrompt).toContain('=== inbound 5/5 ===');
+      expect(batchPrompt).not.toContain('hist-1');
+      expect(batchPrompt).not.toContain('hist-2');
+      expect(batchPrompt).toContain('hist-3');
+      expect(batchPrompt).toContain('hist-4');
+      expect(batchPrompt).toContain('hist-5');
+      expect(batchPrompt).not.toContain('b6');
+      expect(batchPrompt).toEndWith(
+        '上の各メッセージについて、指示書の手順に従ってそれぞれ判断し、返すものは tool.ts で個別に（各 message_id を --reply_to に付けて）返す。返さないものには何もしない。最終回答は 1 行でよい。',
+      );
+
+      const sixthPrompt = promptEntries[2]!.msg.params?.prompt?.[0]?.text ?? '';
+      expect(sixthPrompt).toContain('=== inbound ===');
+      expect(sixthPrompt).toContain('b6');
+      expect(sixthPrompt).toEndWith(
+        '指示書の手順に従って判断し、返すなら tool.ts で返す。返さないなら何もしない。この会話への最終回答は 1 行でよい。',
+      );
+
+      // ターン完了ログ形式の確認
+      expect(
+        logs.some((l) =>
+          /^ACP ターン完了: 種別=inbound×1 待ち=\d+\.\d 処理=\d+\.\d stopReason=end_turn$/.test(l),
+        ),
+      ).toBe(true);
+      expect(
+        logs.some((l) =>
+          /^ACP ターン完了: 種別=inbound×5 待ち=\d+\.\d 処理=\d+\.\d stopReason=end_turn$/.test(l),
+        ),
+      ).toBe(true);
+    } finally {
+      await brain.stop();
+    }
+  });
+
+  test('状態ファイルを毎回読み直して先頭に添付し、無ければ付けず警告は 1 回だけ出す', async () => {
+    const dir = makeTempDir();
+    const stateDir1 = path.join(dir, 'state1');
+    const stateFile = path.join(dir, '現在の状態.md');
+    const logFile1 = path.join(dir, 'fake1.jsonl');
+    process.env.FAKE_ACP_LOG_FILE = logFile1;
+
+    fs.writeFileSync(stateFile, 'ペルソナ: 初号\n', 'utf8');
+
+    let turnEnds1 = 0;
+    const logs1: string[] = [];
+    const brain1 = createAcpBrain({
+      command: `bun "${FIXTURE_PATH}"`,
+      cwd: dir,
+      stateDir: stateDir1,
+      instructionsPath: 'C:/repo/GEMINI_BRAIN.md',
+      stateFilePath: stateFile,
+      log: (m) => logs1.push(m),
+      onTurnEnd: () => {
+        turnEnds1 += 1;
+      },
+    });
+
+    try {
+      brain1.enqueue({ kind: 'inbound', inbound: 'm1', history: 'h1' });
+      await waitFor(() => turnEnds1 === 1);
+
+      fs.writeFileSync(stateFile, 'ペルソナ: 二号\n', 'utf8');
+      brain1.enqueue({ kind: 'patrol', channels: [{ chatId: 'ch1', history: 'hp' }] });
+      await waitFor(() => turnEnds1 === 2);
+
+      fs.writeFileSync(stateFile, 'ペルソナ: 三号\n', 'utf8');
+      brain1.enqueue({
+        kind: 'journal',
+        reason: 'shutdown',
+        date: '2026-11-24',
+        since: '2026-11-23T15:00:00.000Z',
+        channels: [{ chatId: 'ch1', history: '[2026-11-24T01:00:00.000Z] a: hi  (id: 1)' }],
+      });
+      brain1.close();
+      expect(await brain1.drain(5000)).toBe(true);
+      expect(turnEnds1).toBe(3);
+
+      const prompts1 = readFakeLog(logFile1)
+        .filter((e) => e.kind === 'received' && e.msg.method === 'session/prompt')
+        .map((e) => e.msg.params?.prompt?.[0]?.text ?? '');
+
+      expect(prompts1[0]).toStartWith(
+        '最初に C:/repo/GEMINI_BRAIN.md を読み、ACP モードの節に従うこと。現在の状態は各発言の先頭に添付されるので、現在の状態.md を読み直す必要はない。',
+      );
+      expect(prompts1[0]).toContain('=== 現在の状態（bot が添付。読み直し不要） ===\nペルソナ: 初号');
+      expect(prompts1[1]).toStartWith('=== 現在の状態（bot が添付。読み直し不要） ===\nペルソナ: 二号');
+      expect(prompts1[2]).toStartWith('=== 現在の状態（bot が添付。読み直し不要） ===\nペルソナ: 三号');
+      expect(
+        logs1.some((l) =>
+          /^ACP ターン完了: 種別=patrol 待ち=\d+\.\d 処理=\d+\.\d stopReason=end_turn$/.test(l),
+        ),
+      ).toBe(true);
+      expect(
+        logs1.some((l) =>
+          /^ACP ターン完了: 種別=journal 待ち=\d+\.\d 処理=\d+\.\d stopReason=end_turn$/.test(l),
+        ),
+      ).toBe(true);
+    } finally {
+      await brain1.stop();
+    }
+
+    // 状態ファイルが存在しない場合: 添付せず、警告は 1 回だけ
+    const stateDir2 = path.join(dir, 'state2');
+    const logFile2 = path.join(dir, 'fake2.jsonl');
+    process.env.FAKE_ACP_LOG_FILE = logFile2;
+
+    let turnEnds2 = 0;
+    const logs2: string[] = [];
+    const brain2 = createAcpBrain({
+      command: `bun "${FIXTURE_PATH}"`,
+      cwd: dir,
+      stateDir: stateDir2,
+      instructionsPath: 'C:/repo/GEMINI_BRAIN.md',
+      stateFilePath: path.join(dir, 'missing-state.md'),
+      log: (m) => logs2.push(m),
+      onTurnEnd: () => {
+        turnEnds2 += 1;
+      },
+    });
+
+    try {
+      brain2.enqueue({ kind: 'inbound', inbound: 'm1', history: '' });
+      await waitFor(() => turnEnds2 === 1);
+      brain2.enqueue({ kind: 'inbound', inbound: 'm2', history: '' });
+      await waitFor(() => turnEnds2 === 2);
+
+      const prompts2 = readFakeLog(logFile2)
+        .filter((e) => e.kind === 'received' && e.msg.method === 'session/prompt')
+        .map((e) => e.msg.params?.prompt?.[0]?.text ?? '');
+
+      expect(prompts2[0]).not.toContain('=== 現在の状態');
+      expect(prompts2[1]).not.toContain('=== 現在の状態');
+      expect(logs2.filter((l) => l.includes('状態ファイルを読み込めません')).length).toBe(1);
+    } finally {
+      await brain2.stop();
     }
   });
 });

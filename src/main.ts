@@ -266,11 +266,15 @@ async function main(): Promise<void> {
       }
     }
     void (async () => {
+      const fetchStartMs = Date.now();
       let history = '';
       try {
         history = await discord.tools.fetchMessages({ channel: chatId, limit: 15 });
+        const elapsedSec = Math.max(0, (Date.now() - fetchStartMs) / 1000).toFixed(1);
+        console.log(`${jstPrefix()} 履歴取得 ${elapsedSec} 秒`);
       } catch (err) {
-        console.error(`${jstPrefix()} 履歴の取得に失敗:`, err);
+        const elapsedSec = Math.max(0, (Date.now() - fetchStartMs) / 1000).toFixed(1);
+        console.error(`${jstPrefix()} 履歴の取得に失敗 (${elapsedSec} 秒):`, err);
       }
       if (shuttingDown) {
         discord.stopTyping();
@@ -281,7 +285,7 @@ async function main(): Promise<void> {
           discord.stopTyping();
           return;
         }
-        acpBrain.enqueue({ kind: 'inbound', inbound: text, history });
+        acpBrain.enqueue({ kind: 'inbound', inbound: text, history, chatId });
         return;
       }
       // T3 の予約タスクは webhook の本文をプロンプトに入れないので、受信内容はファイルに置き、
@@ -328,6 +332,7 @@ async function main(): Promise<void> {
         stateDir: env.stateDir,
         model: acpEnv.model,
         instructionsPath: acpEnv.instructionsPath,
+        stateFilePath: existsSync(join(env.workspace, '現在の状態.md')) ? join(env.workspace, '現在の状態.md') : undefined,
         promptTimeoutSec: acpEnv.promptTimeoutSec,
         maxTurns: acpEnv.maxTurns,
         fresh: env.fresh,
