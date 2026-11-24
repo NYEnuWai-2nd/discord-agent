@@ -27,6 +27,7 @@ export const HELP_TEXT = [
   '  note_person          --user_id <id> --note <text>',
   '  list_models',
   '  set_model            --chat_id <id> --message_id <id> --model <model_id>',
+  '  write_journal        --text <text> [--date <YYYY-MM-DD>] [--text-file <path>]',
 ].join('\n');
 
 /**

@@ -49,7 +49,7 @@ export function formatJstDate(now: Date = new Date()): string {
 }
 
 /** 一時ファイル経由で原子的に UTF-8 ファイルを書き込む */
-function writeFileAtomic(targetPath: string, content: string): void {
+export function writeFileAtomic(targetPath: string, content: string): void {
   mkdirSync(dirname(targetPath), { recursive: true });
   const tmpPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
   try {
@@ -434,4 +434,93 @@ export async function notePerson(
   const { nextContent, name } = appendNoteToPersonCsv(current, args, deps.now);
   writeFileAtomic(csvPath, nextContent);
   return `追記: ${name} (${args.user_id})`;
+}
+
+/** 日誌用日付を検証して `YYYY-MM-DD` を返す（省略時は JST の今日） */
+export function resolveJournalDate(date: string | undefined, now: Date = new Date()): string {
+  const today = formatJstDate(now);
+  const target = date ?? today;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(target);
+  if (!match) {
+    throw new Error(`date の形式が不正です（YYYY-MM-DD）: ${target}`);
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  if (dt.getUTCFullYear() !== year || dt.getUTCMonth() + 1 !== month || dt.getUTCDate() !== day) {
+    throw new Error(`存在しない日付です: ${target}`);
+  }
+  if (target > today) {
+    throw new Error(`未来の日付は指定できません: ${target}`);
+  }
+  return target;
+}
+
+/**
+ * 日誌ファイル（`Context/日誌/<date>.md`）の新しい内容を生成する（純粋関数）。
+ * 既存内容が無ければ `# 日誌 <date>` 見出しを先頭に付け、`## HH:MM（JST）` 節を追記する。
+ */
+export function buildJournalContent(
+  existingContent: string | null | undefined,
+  args: { text: string; date?: string },
+  now: Date = new Date(),
+): { nextContent: string; date: string } {
+  if (typeof args.text !== 'string' || args.text.trim().length === 0) {
+    throw new Error('text を指定してください');
+  }
+  if (args.text.length > 6000) {
+    throw new Error('text は 6000 文字以内にしてください');
+  }
+
+  const targetDate = resolveJournalDate(args.date, now);
+  const parts = toJstParts(now);
+  const heading = `## ${parts.hour}:${parts.minute}（JST）`;
+  const body = args.text.replace(/\r\n/g, '\n').replace(/\n+$/, '');
+  const entry = `${heading}\n\n${body}\n\n`;
+
+  if (!existingContent) {
+    return {
+      nextContent: `# 日誌 ${targetDate}\n\n${entry}`,
+      date: targetDate,
+    };
+  }
+
+  let separator = '\n\n';
+  if (existingContent.endsWith('\r\n\r\n') || existingContent.endsWith('\n\n')) {
+    separator = '';
+  } else if (existingContent.endsWith('\r\n') || existingContent.endsWith('\n')) {
+    separator = '\n';
+  }
+
+  return {
+    nextContent: `${existingContent}${separator}${entry}`,
+    date: targetDate,
+  };
+}
+
+/**
+ * `write_journal` を実行する: `{workspace}/Context/日誌/<date>.md` に原子的に追記する。
+ */
+export async function writeJournal(
+  deps: { workspace: string; now?: Date },
+  args: { text: string; date?: string },
+): Promise<string> {
+  const now = deps.now ?? new Date();
+  const targetDate = resolveJournalDate(args.date, now);
+  const journalPath = join(deps.workspace, 'Context', '日誌', `${targetDate}.md`);
+
+  let existing: string | null = null;
+  try {
+    existing = readFileSync(journalPath, 'utf8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      throw err;
+    }
+  }
+
+  const { nextContent } = buildJournalContent(existing, args, now);
+  writeFileAtomic(journalPath, nextContent);
+  return `日誌に追記: Context/日誌/${targetDate}.md`;
 }

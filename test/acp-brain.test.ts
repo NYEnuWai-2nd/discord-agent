@@ -82,6 +82,30 @@ describe('formatAcpPrompt', () => {
     expect(patrolWithoutIntro.startsWith('=== patrol ===')).toBe(true);
     expect(patrolWithoutIntro).toContain('--- chat_id=111 ---\nline1');
     expect(patrolWithoutIntro).toContain('--- chat_id=222 ---\nline2');
+
+    const journalPrompt = formatAcpPrompt(
+      {
+        kind: 'journal',
+        reason: 'daily',
+        date: '2026-11-24',
+        since: '2026-11-23T15:00:00.000Z',
+        channels: [{ chatId: 'ch1', history: '[2026-11-24T01:00:00.000Z] alice: hello  (id: 1)' }],
+      },
+      'C:/repo/GEMINI_BRAIN.md',
+      false,
+    );
+    expect(journalPrompt).toBe(
+      [
+        '=== journal ===',
+        '理由: daily',
+        '日付: 2026-11-24',
+        '対象期間: 2026-11-24 00:00 JST 〜 今',
+        '--- chat_id=ch1 ---',
+        '[2026-11-24T01:00:00.000Z] alice: hello  (id: 1)',
+        '',
+        '指示書の『日誌』の節に従って要約し、tool.ts write_journal で書く。Discord には何も送らない。最終回答は 1 行でよい。',
+      ].join('\n'),
+    );
   });
 });
 
@@ -371,6 +395,54 @@ describe('createAcpBrain', () => {
       expect(setModels.every((m) => m === 'model-b')).toBe(true);
     } finally {
       await brain1.stop();
+    }
+  });
+
+  test('close は以後の enqueue を無視し、drain は処理完了まで待って true・タイムアウトで false を返す', async () => {
+    const dir = makeTempDir();
+    const stateDir = path.join(dir, 'state');
+    const logFile = path.join(dir, 'fake.jsonl');
+    process.env.FAKE_ACP_LOG_FILE = logFile;
+
+    let turnEnds = 0;
+    const brain = createAcpBrain({
+      command: `bun "${FIXTURE_PATH}"`,
+      cwd: dir,
+      stateDir,
+      instructionsPath: 'C:/repo/GEMINI_BRAIN.md',
+      log: () => {},
+      onTurnEnd: () => {
+        turnEnds += 1;
+      },
+    });
+
+    try {
+      // アイドル状態なら即 true
+      expect(await brain.drain(100)).toBe(true);
+
+      brain.enqueue({ kind: 'inbound', inbound: 'slow-turn TRIGGER_DELAY:250', history: '' });
+      // タイムアウトが短ければ false
+      expect(await brain.drain(30)).toBe(false);
+
+      // 完了まで待てば true
+      expect(await brain.drain(5000)).toBe(true);
+      expect(turnEnds).toBe(1);
+
+      // close 後の enqueue は無視される
+      brain.enqueue({ kind: 'inbound', inbound: 'accepted-before-close TRIGGER_DELAY:80', history: '' });
+      brain.close();
+      brain.enqueue({ kind: 'inbound', inbound: 'ignored-after-close', history: '' });
+
+      expect(await brain.drain(5000)).toBe(true);
+      expect(turnEnds).toBe(2);
+
+      const prompts = readFakeLog(logFile)
+        .filter((e) => e.kind === 'received' && e.msg.method === 'session/prompt')
+        .map((e) => e.msg.params?.prompt?.[0]?.text ?? '');
+      expect(prompts.some((t) => t.includes('accepted-before-close'))).toBe(true);
+      expect(prompts.some((t) => t.includes('ignored-after-close'))).toBe(false);
+    } finally {
+      await brain.stop();
     }
   });
 });

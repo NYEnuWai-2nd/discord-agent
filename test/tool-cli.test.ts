@@ -145,5 +145,18 @@ describe('parseToolArgs', () => {
 
     expect(HELP_TEXT).toContain('list_models');
     expect(HELP_TEXT).toContain('set_model');
+
+    const journalArgs = parseToolArgs([
+      'write_journal',
+      '--date',
+      '2026-11-24',
+      '--text',
+      '今日の日誌',
+    ]);
+    expect(journalArgs).toEqual({
+      name: 'write_journal',
+      args: { date: '2026-11-24', text: '今日の日誌' },
+    });
+    expect(HELP_TEXT).toContain('write_journal');
   });
 });

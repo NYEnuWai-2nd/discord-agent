@@ -95,7 +95,7 @@ function pruneHandled(handled: Set<string>): void {
  * 設定から巡回対象チャンネル ID 一覧を解決する。
  * patrolChannels が空なら channels の全キー、指定ありなら channels にも含まれるもののみ返す。
  */
-function resolveTargetChannels(cfg: BotConfig): string[] {
+export function resolveTargetChannels(cfg: BotConfig): string[] {
   const configured = cfg.patrolChannels ?? [];
   if (configured.length === 0) {
     return Object.keys(cfg.channels);

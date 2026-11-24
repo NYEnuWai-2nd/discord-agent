@@ -12,43 +12,74 @@
 import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { formatJournalBody, type JournalReason } from '../src/journal.ts';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-// このリポジトリの .env から BOT_STATE_DIR だけ読む
-let stateDirSetting = process.env.BOT_STATE_DIR;
-if (stateDirSetting === undefined) {
-  try {
-    const m = /^BOT_STATE_DIR=(.*)$/m.exec(readFileSync(join(REPO_ROOT, '.env'), 'utf8'));
-    if (m && m[1]!.trim()) stateDirSetting = m[1]!.trim();
-  } catch {
-    // .env が無ければ既定値
+export type PendingPayload = {
+  kind?: string;
+  reason?: JournalReason;
+  date?: string;
+  since?: string;
+  inbound?: string;
+  history?: string;
+  channels?: Array<{ chatId?: string; name?: string; history?: string }>;
+};
+
+/** pending JSON の内容を標準出力向けの文字列へ整形する */
+export function formatPendingPayload(data: PendingPayload): string {
+  if (data.kind === 'patrol') {
+    const lines = ['=== patrol ==='];
+    for (const ch of data.channels ?? []) {
+      lines.push(`--- chat_id=${ch.chatId ?? ''} ---`);
+      lines.push(ch.history ?? '');
+    }
+    return lines.join('\n');
   }
+  if (data.kind === 'journal') {
+    return formatJournalBody({
+      reason: data.reason === 'shutdown' ? 'shutdown' : 'daily',
+      date: data.date ?? '',
+      since: data.since ?? '',
+      channels: (data.channels ?? []).map((ch) => ({
+        chatId: ch.chatId ?? '',
+        ...(ch.name ? { name: ch.name } : {}),
+        history: ch.history ?? '',
+      })),
+    });
+  }
+  return [
+    '=== inbound ===',
+    data.inbound ?? '',
+    '=== history（古い順。me は bot 自身） ===',
+    data.history ?? '',
+  ].join('\n');
 }
-const stateDir = resolve(REPO_ROOT, stateDirSetting || '.state');
-const pendingDir = join(stateDir, 'pending');
-const takenDir = join(stateDir, 'taken');
-const heartbeatFile = join(stateDir, 'resident.json');
-mkdirSync(takenDir, { recursive: true });
 
-// --wait <秒>（上限 300 秒。コマンドの実行時間制限に引っかからないよう長くしすぎない）
-const waitIdx = process.argv.indexOf('--wait');
-const waitSec = waitIdx !== -1 ? Math.min(300, Math.max(0, Number(process.argv[waitIdx + 1]) || 0)) : 0;
-const deadline = Date.now() + waitSec * 1000;
-
-function heartbeat(): void {
-  try {
-    writeFileSync(heartbeatFile, JSON.stringify({ at: Date.now(), pid: process.pid }));
-  } catch {
-    // 心拍が書けなくても受信処理は続ける
+function resolveStateDir(): string {
+  // このリポジトリの .env から BOT_STATE_DIR だけ読む
+  let stateDirSetting = process.env.BOT_STATE_DIR;
+  if (stateDirSetting === undefined) {
+    try {
+      const m = /^BOT_STATE_DIR=(.*)$/m.exec(readFileSync(join(REPO_ROOT, '.env'), 'utf8'));
+      if (m && m[1]!.trim()) stateDirSetting = m[1]!.trim();
+    } catch {
+      // .env が無ければ既定値
+    }
   }
+  return resolve(REPO_ROOT, stateDirSetting || '.state');
 }
 
 /** 1 件取り出して表示できたら true */
-function tryTake(): boolean {
+export function takePendingOnce(
+  pendingDir: string,
+  takenDir: string,
+  output: (text: string) => void = console.log,
+): boolean {
+  mkdirSync(takenDir, { recursive: true });
   let files: string[] = [];
   try {
-    files = readdirSync(pendingDir).filter(f => f.endsWith('.json')).sort();
+    files = readdirSync(pendingDir).filter((f) => f.endsWith('.json')).sort();
   } catch {
     files = [];
   }
@@ -59,40 +90,49 @@ function tryTake(): boolean {
     } catch {
       continue; // 別の実行が先に取った
     }
-    const data = JSON.parse(readFileSync(dest, 'utf8')) as {
-      kind?: string;
-      inbound?: string;
-      history?: string;
-      channels?: Array<{ chatId?: string; history?: string }>;
-    };
-    console.log(`残り: ${files.length - files.indexOf(f) - 1} 件`);
-    if (data.kind === 'patrol') {
-      console.log('=== patrol ===');
-      for (const ch of data.channels ?? []) {
-        console.log(`--- chat_id=${ch.chatId ?? ''} ---`);
-        console.log(ch.history ?? '');
-      }
-    } else {
-      console.log('=== inbound ===');
-      console.log(data.inbound ?? '');
-      console.log('=== history（古い順。me は bot 自身） ===');
-      console.log(data.history ?? '');
-    }
+    const data = JSON.parse(readFileSync(dest, 'utf8')) as PendingPayload;
+    output(`残り: ${files.length - files.indexOf(f) - 1} 件`);
+    output(formatPendingPayload(data));
     return true;
   }
   return false;
 }
 
-if (waitSec > 0) heartbeat();
-while (true) {
-  if (tryTake()) {
-    // 取り出した直後も心拍を更新しておく（処理中に webhook が飛ばないように）
-    if (waitSec > 0) heartbeat();
-    process.exit(0);
+async function main(): Promise<void> {
+  const stateDir = resolveStateDir();
+  const pendingDir = join(stateDir, 'pending');
+  const takenDir = join(stateDir, 'taken');
+  const heartbeatFile = join(stateDir, 'resident.json');
+  mkdirSync(takenDir, { recursive: true });
+
+  // --wait <秒>（上限 300 秒。コマンドの実行時間制限に引っかからないよう長くしすぎない）
+  const waitIdx = process.argv.indexOf('--wait');
+  const waitSec = waitIdx !== -1 ? Math.min(300, Math.max(0, Number(process.argv[waitIdx + 1]) || 0)) : 0;
+  const deadline = Date.now() + waitSec * 1000;
+
+  function heartbeat(): void {
+    try {
+      writeFileSync(heartbeatFile, JSON.stringify({ at: Date.now(), pid: process.pid }));
+    } catch {
+      // 心拍が書けなくても受信処理は続ける
+    }
   }
-  if (Date.now() >= deadline) break;
-  heartbeat();
-  await Bun.sleep(1000);
+
+  if (waitSec > 0) heartbeat();
+  while (true) {
+    if (takePendingOnce(pendingDir, takenDir)) {
+      // 取り出した直後も心拍を更新しておく（処理中に webhook が飛ばないように）
+      if (waitSec > 0) heartbeat();
+      process.exit(0);
+    }
+    if (Date.now() >= deadline) break;
+    heartbeat();
+    await Bun.sleep(1000);
+  }
+
+  console.log('(no pending messages)');
 }
 
-console.log('(no pending messages)');
+if (import.meta.main) {
+  void main();
+}

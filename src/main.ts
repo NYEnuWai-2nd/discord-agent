@@ -5,6 +5,7 @@ import { runAgentForever } from './agent.ts';
 import { loadAcpEnv, loadConfig, loadEnv, resolveBrainKind, type AcpEnv, type BrainKind, type Env } from './config.ts';
 import { createDiscord } from './discord.ts';
 import { Inbox } from './inbox.ts';
+import { collectAndEnqueueJournal, startDailyJournalScheduler, type JournalReason } from './journal.ts';
 import { hasPendingPatrol, startPatrol } from './patrol.ts';
 import { startToolServer } from './tool-server.ts';
 import { createDiscordMcpServer } from './tools.ts';
@@ -52,78 +53,27 @@ async function main(): Promise<void> {
 
   let toolServer: { port: number; stop(): void } | undefined;
   let patrol: { stop(): void } | undefined;
+  let journalScheduler: { stop(): void } | undefined;
   let acpBrain: AcpBrain | undefined;
-  let shuttingDown = false;
-  const shutdown = (signal: string) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.log(`${jstPrefix()} ${signal} を受信したため終了します...`);
-
-    const forceTimer = setTimeout(() => {
-      console.error(`${jstPrefix()} 終了処理がタイムアウトしたため強制終了します`);
-      process.exit(0);
-    }, 2_000);
-    forceTimer.unref();
-
-    acpBrain?.stop();
-    patrol?.stop();
-    toolServer?.stop();
-    void discord.destroy().finally(() => {
-      clearTimeout(forceTimer);
-      process.exit(0);
-    });
-  };
-
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('unhandledRejection', (reason) => {
-    console.error(`${jstPrefix()} 未処理の Promise 拒否:`, reason);
-  });
-  process.on('uncaughtException', (err) => {
-    console.error(`${jstPrefix()} 未捕捉の例外:`, err);
-  });
-
-  // BOT_BRAIN=webhook: 頭脳を呼ばず、受信内容と直近の履歴を webhook に転送する（T3 Code の予約タスク経由で Gemini が返す試作）
-  // BOT_BRAIN=acp: 汎用 ACP エージェントを子プロセス起動し、単一セッションへ直列に prompt を送る
-  let brain: BrainKind;
-  try {
-    brain = resolveBrainKind();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`${jstPrefix()} 環境設定エラー: ${msg}`);
-    process.exit(1);
-  }
-
-  const webhookUrl = process.env.BOT_WEBHOOK_URL?.trim();
-  if (brain === 'webhook' && !webhookUrl) {
-    console.error(`${jstPrefix()} 環境設定エラー: BOT_BRAIN=webhook には BOT_WEBHOOK_URL が必要です`);
-    process.exit(1);
-  }
-
-  let acpEnv: AcpEnv | undefined;
-  if (brain === 'acp') {
-    try {
-      acpEnv = loadAcpEnv(env.workspace);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`${jstPrefix()} 環境設定エラー: ${msg}`);
-      process.exit(1);
-    }
-  }
-
+  let brain: BrainKind = 'claude';
+  let webhookUrl: string | undefined;
   const pendingDir = join(env.stateDir, 'pending');
   const handled = new Set<string>();
 
-  async function enqueueWebhookItem(id: string, payload: unknown): Promise<boolean> {
+  function savePendingItem(id: string, payload: unknown): boolean {
     try {
       mkdirSync(pendingDir, { recursive: true });
       const tmp = join(pendingDir, `${id}.json.tmp`);
       writeFileSync(tmp, JSON.stringify(payload, null, 2));
       renameSync(tmp, join(pendingDir, `${id}.json`));
+      return true;
     } catch (err) {
       console.error(`${jstPrefix()} 受信内容の保存に失敗:`, err);
       return false;
     }
+  }
+
+  async function notifyWebhook(id: string): Promise<boolean> {
     // Gemini が常駐中（take.ts --wait の心拍が新しい）なら、ファイルを置くだけで webhook は省く
     try {
       const hb = JSON.parse(readFileSync(join(env.stateDir, 'resident.json'), 'utf8')) as { at?: number };
@@ -148,7 +98,159 @@ async function main(): Promise<void> {
     }
   }
 
+  async function enqueueWebhookItem(id: string, payload: unknown): Promise<boolean> {
+    if (!savePendingItem(id, payload)) return false;
+    return notifyWebhook(id);
+  }
+
+  async function dispatchJournal(reason: JournalReason): Promise<boolean> {
+    if (brain === 'claude') return false;
+    return collectAndEnqueueJournal({
+      reason,
+      stateDir: env.stateDir,
+      getConfig: () => loadConfig(env.configPath),
+      fetchMessages: (channelId) => discord.tools.fetchMessages({ channel: channelId, limit: 100 }),
+      getChannelName: async (channelId) => {
+        const ch = await discord.client.channels.fetch(channelId);
+        return ch && 'name' in ch && typeof ch.name === 'string' ? ch.name : undefined;
+      },
+      enqueue: async (item) => {
+        if (brain === 'acp') {
+          if (!acpBrain) return false;
+          acpBrain.enqueue(item);
+          return true;
+        }
+        const id = `${Date.now()}-journal`;
+        const saved = savePendingItem(id, item);
+        if (saved) {
+          await notifyWebhook(id);
+        }
+        return saved;
+      },
+      log: (msg) => console.log(`${jstPrefix()} ${msg}`),
+    });
+  }
+
+  let shuttingDown = false;
+  let forceExitRequested = false;
+  let activeForceTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const finishTeardown = (forceTimeoutMs: number) => {
+    if (activeForceTimer !== undefined) {
+      clearTimeout(activeForceTimer);
+    }
+    const forceTimer = setTimeout(() => {
+      console.error(`${jstPrefix()} 終了処理がタイムアウトしたため強制終了します`);
+      process.exit(0);
+    }, forceTimeoutMs);
+    forceTimer.unref();
+    activeForceTimer = forceTimer;
+
+    acpBrain?.close();
+    void acpBrain?.stop();
+    patrol?.stop();
+    journalScheduler?.stop();
+    toolServer?.stop();
+    void discord.destroy().finally(() => {
+      clearTimeout(forceTimer);
+      process.exit(0);
+    });
+  };
+
+  const shutdown = (signal: string) => {
+    if (shuttingDown) {
+      if (!forceExitRequested) {
+        forceExitRequested = true;
+        console.log(`${jstPrefix()} ${signal} を再受信したため即終了します`);
+        finishTeardown(2_000);
+      }
+      return;
+    }
+    shuttingDown = true;
+    console.log(`${jstPrefix()} ${signal} を受信したため終了します...`);
+
+    patrol?.stop();
+    journalScheduler?.stop();
+
+    if (brain === 'acp' && env.journalOnExit && acpBrain) {
+      const timeoutMs = env.journalExitTimeoutSec * 1000;
+      const forceTimer = setTimeout(() => {
+        console.error(`${jstPrefix()} 終了処理がタイムアウトしたため強制終了します`);
+        process.exit(0);
+      }, timeoutMs + 5_000);
+      forceTimer.unref();
+      activeForceTimer = forceTimer;
+
+      void (async () => {
+        try {
+          const dispatched = await dispatchJournal('shutdown');
+          acpBrain.close();
+          if (forceExitRequested) return;
+          if (dispatched) {
+            console.log(`${jstPrefix()} 日誌を書いてから終了します（もう一度 Ctrl+C で即終了）`);
+            const drained = await acpBrain.drain(timeoutMs);
+            if (!drained && !forceExitRequested) {
+              console.error(
+                `${jstPrefix()} 日誌の終了待機がタイムアウトしました (${env.journalExitTimeoutSec} 秒)`,
+              );
+            }
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`${jstPrefix()} 終了時日誌エラー: ${msg}`);
+          acpBrain.close();
+        }
+
+        if (forceExitRequested) return;
+        finishTeardown(2_000);
+      })();
+      return;
+    }
+
+    finishTeardown(2_000);
+  };
+
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('unhandledRejection', (reason) => {
+    console.error(`${jstPrefix()} 未処理の Promise 拒否:`, reason);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error(`${jstPrefix()} 未捕捉の例外:`, err);
+  });
+
+  // BOT_BRAIN=webhook: 頭脳を呼ばず、受信内容と直近の履歴を webhook に転送する（T3 Code の予約タスク経由で Gemini が返す試作）
+  // BOT_BRAIN=acp: 汎用 ACP エージェントを子プロセス起動し、単一セッションへ直列に prompt を送る
+  try {
+    brain = resolveBrainKind();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`${jstPrefix()} 環境設定エラー: ${msg}`);
+    process.exit(1);
+  }
+
+  webhookUrl = process.env.BOT_WEBHOOK_URL?.trim();
+  if (brain === 'webhook' && !webhookUrl) {
+    console.error(`${jstPrefix()} 環境設定エラー: BOT_BRAIN=webhook には BOT_WEBHOOK_URL が必要です`);
+    process.exit(1);
+  }
+
+  let acpEnv: AcpEnv | undefined;
+  if (brain === 'acp') {
+    try {
+      acpEnv = loadAcpEnv(env.workspace);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`${jstPrefix()} 環境設定エラー: ${msg}`);
+      process.exit(1);
+    }
+  }
+
   discord.onInbound((text, chatId) => {
+    if (shuttingDown) {
+      discord.stopTyping();
+      return;
+    }
     const firstLine = (text.split(/\r?\n/, 1)[0] ?? '').slice(0, 200);
     console.log(`${jstPrefix()} 受信: ${firstLine}`);
     if (brain === 'claude') {
@@ -169,6 +271,10 @@ async function main(): Promise<void> {
         history = await discord.tools.fetchMessages({ channel: chatId, limit: 15 });
       } catch (err) {
         console.error(`${jstPrefix()} 履歴の取得に失敗:`, err);
+      }
+      if (shuttingDown) {
+        discord.stopTyping();
+        return;
       }
       if (brain === 'acp') {
         if (!acpBrain) {
@@ -238,6 +344,7 @@ async function main(): Promise<void> {
         fetchSnapshot: (channelId) => discord.fetchSnapshot(channelId),
         handled,
         enqueue: async (channels) => {
+          if (shuttingDown) return;
           if (brain === 'acp') {
             if (!acpBrain) return;
             if (acpBrain.hasPendingPatrol()) {
@@ -258,6 +365,20 @@ async function main(): Promise<void> {
       });
     } else {
       console.log(`${jstPrefix()} 巡回: 無効`);
+    }
+
+    if (env.journalTime) {
+      console.log(`${jstPrefix()} 日誌: 毎日 ${env.journalTime}`);
+      journalScheduler = startDailyJournalScheduler({
+        time: env.journalTime,
+        onTrigger: async () => {
+          if (shuttingDown) return;
+          await dispatchJournal('daily');
+        },
+        log: (msg) => console.log(`${jstPrefix()} ${msg}`),
+      });
+    } else {
+      console.log(`${jstPrefix()} 日誌: 無効`);
     }
     return;
   }

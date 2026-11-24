@@ -438,4 +438,29 @@ describe('handleToolRequest', () => {
     });
     expect(requested).toEqual(['gemini-4-hydrogen-high']);
   });
+
+  test('write_journal が HTTP 経由で日誌ファイルを作成する', async () => {
+    const workspace = makeTempWorkspace();
+    const { tools } = createFakeTools();
+    const ctx = makeCtx(tools, { workspace });
+
+    const res = await handleToolRequest(
+      makeRequest('/tool/write_journal', {
+        body: JSON.stringify({
+          date: '2026-11-24',
+          text: '本日のまとめ',
+        }),
+      }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      result: '日誌に追記: Context/日誌/2026-11-24.md',
+    });
+
+    const content = readFileSync(join(workspace, 'Context', '日誌', '2026-11-24.md'), 'utf8');
+    expect(content).toContain('# 日誌 2026-11-24');
+    expect(content).toContain('本日のまとめ');
+  });
 });

@@ -16,10 +16,12 @@ import {
   appendNoteToPersonCsv,
   appendPersonToCsv,
   applyStateUpdate,
+  buildJournalContent,
   escapeCsvField,
   notePerson,
   parseCsvRecords,
   setState,
+  writeJournal,
 } from '../src/workspace-tools.ts';
 
 const tempDirs: string[] = [];
@@ -320,5 +322,67 @@ describe('CSV パース・エスケープ・addPerson / notePerson', () => {
       '名前,user_id,解説\r\ntest_person,555666,初期解説。追記メモ（2026-11-20 追記）\r\n',
     );
     expect(readdirSync(ctxDir).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+  });
+});
+
+describe('buildJournalContent / writeJournal', () => {
+  test('新規ファイル時は # 日誌 <date> と空行を先頭に付け、## HH:MM（JST）見出しで書く', () => {
+    // 2026-11-24T14:55:00.000Z -> JST 2026-11-24 23:55
+    const now = new Date('2026-11-24T14:55:00.000Z');
+    const res = buildJournalContent(null, { text: '### 話題\n- 雑談した' }, now);
+    expect(res.date).toBe('2026-11-24');
+    expect(res.nextContent).toBe(
+      '# 日誌 2026-11-24\n\n## 23:55（JST）\n\n### 話題\n- 雑談した\n\n',
+    );
+  });
+
+  test('既存内容への追記時は末尾の改行状態に関わらず空行区切りで追記する', () => {
+    const firstNow = new Date('2026-11-24T10:00:00.000Z'); // JST 19:00
+    const first = buildJournalContent(undefined, { text: '1回目のメモ', date: '2026-11-24' }, firstNow);
+
+    const secondNow = new Date('2026-11-24T14:55:00.000Z'); // JST 23:55
+    const second = buildJournalContent(first.nextContent, { text: '2回目のメモ' }, secondNow);
+    expect(second.nextContent).toBe(
+      '# 日誌 2026-11-24\n\n## 19:00（JST）\n\n1回目のメモ\n\n## 23:55（JST）\n\n2回目のメモ\n\n',
+    );
+
+    // 末尾に空行が無い既存内容でも空行を補って追記する
+    const withoutBlank = buildJournalContent('# 日誌 2026-11-24\n\n## 19:00（JST）\n\n手動追記', {
+      text: '次の追記',
+    }, secondNow);
+    expect(withoutBlank.nextContent).toBe(
+      '# 日誌 2026-11-24\n\n## 19:00（JST）\n\n手動追記\n\n## 23:55（JST）\n\n次の追記\n\n',
+    );
+  });
+
+  test('不正な date・未来の日付・空本文・6000文字超過はエラー', () => {
+    const now = new Date('2026-11-24T04:00:00.000Z'); // JST 2026-11-24 13:00
+
+    expect(() => buildJournalContent(null, { text: 'ok', date: '2026/11/24' }, now)).toThrow(/形式/);
+    expect(() => buildJournalContent(null, { text: 'ok', date: '2026-02-30' }, now)).toThrow(/存在しない日付/);
+    expect(() => buildJournalContent(null, { text: 'ok', date: '' }, now)).toThrow(/形式/);
+    expect(() => buildJournalContent(null, { text: 'ok', date: '2026-11-25' }, now)).toThrow(/未来の日付/);
+
+    expect(() => buildJournalContent(null, { text: '   ' }, now)).toThrow(/text/);
+    expect(() => buildJournalContent(null, { text: 'あ'.repeat(6001) }, now)).toThrow(/6000/);
+    expect(() => buildJournalContent(null, { text: 'あ'.repeat(6000) }, now)).not.toThrow();
+  });
+
+  test('writeJournal が Context/日誌 ディレクトリを自動作成し原子的に追記する', async () => {
+    const ws = makeTempDir();
+    const t1 = new Date('2026-11-24T05:10:00.000Z'); // JST 14:10
+    const t2 = new Date('2026-11-24T14:55:00.000Z'); // JST 23:55
+
+    const res1 = await writeJournal({ workspace: ws, now: t1 }, { text: '昼の日誌' });
+    expect(res1).toBe('日誌に追記: Context/日誌/2026-11-24.md');
+
+    const res2 = await writeJournal({ workspace: ws, now: t2 }, { text: '夜の日誌', date: '2026-11-24' });
+    expect(res2).toBe('日誌に追記: Context/日誌/2026-11-24.md');
+
+    const journalDir = join(ws, 'Context', '日誌');
+    expect(readFileSync(join(journalDir, '2026-11-24.md'), 'utf8')).toBe(
+      '# 日誌 2026-11-24\n\n## 14:10（JST）\n\n昼の日誌\n\n## 23:55（JST）\n\n夜の日誌\n\n',
+    );
+    expect(readdirSync(journalDir).filter((f) => f.endsWith('.tmp'))).toEqual([]);
   });
 });

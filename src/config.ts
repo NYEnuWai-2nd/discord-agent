@@ -179,6 +179,9 @@ export type Env = {
   configPath: string;
   fresh: boolean;
   patrolMinutes: number;
+  journalTime?: string;
+  journalOnExit: boolean;
+  journalExitTimeoutSec: number;
 };
 
 /** 頭脳モード */
@@ -257,6 +260,49 @@ export function loadEnv(env: Record<string, string | undefined> = process.env): 
     patrolMinutes = parsed;
   }
 
+  let journalTime: string | undefined = '23:55';
+  if (env.BOT_JOURNAL_TIME !== undefined) {
+    const rawJournalTime = env.BOT_JOURNAL_TIME.trim();
+    if (rawJournalTime === '') {
+      journalTime = undefined;
+    } else {
+      const m = /^(\d{2}):(\d{2})$/.exec(rawJournalTime);
+      if (!m) {
+        throw new Error(`Invalid BOT_JOURNAL_TIME "${rawJournalTime}": must be HH:MM or empty`);
+      }
+      const hour = Number(m[1]);
+      const minute = Number(m[2]);
+      if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+        throw new Error(`Invalid BOT_JOURNAL_TIME "${rawJournalTime}": must be 00:00-23:59`);
+      }
+      journalTime = rawJournalTime;
+    }
+  }
+
+  const rawJournalOnExit = env.BOT_JOURNAL_ON_EXIT?.trim();
+  let journalOnExit = true;
+  if (rawJournalOnExit !== undefined && rawJournalOnExit !== '') {
+    if (rawJournalOnExit === '1') {
+      journalOnExit = true;
+    } else if (rawJournalOnExit === '0') {
+      journalOnExit = false;
+    } else {
+      throw new Error(`Invalid BOT_JOURNAL_ON_EXIT "${rawJournalOnExit}": must be 0 or 1`);
+    }
+  }
+
+  let journalExitTimeoutSec = 120;
+  const rawJournalExitTimeout = env.BOT_JOURNAL_EXIT_TIMEOUT_SEC?.trim();
+  if (rawJournalExitTimeout) {
+    const parsed = Number(rawJournalExitTimeout);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(
+        `Invalid BOT_JOURNAL_EXIT_TIMEOUT_SEC "${rawJournalExitTimeout}": must be > 0`,
+      );
+    }
+    journalExitTimeoutSec = parsed;
+  }
+
   return {
     token,
     workspace,
@@ -266,6 +312,9 @@ export function loadEnv(env: Record<string, string | undefined> = process.env): 
     configPath,
     fresh,
     patrolMinutes,
+    ...(journalTime !== undefined ? { journalTime } : {}),
+    journalOnExit,
+    journalExitTimeoutSec,
   };
 }
 

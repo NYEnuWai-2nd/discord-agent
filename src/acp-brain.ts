@@ -1,8 +1,10 @@
 import { AcpClient, clearAcpSessionId, loadAcpModel, saveAcpModel } from './acp-client.ts';
+import { formatJournalBody, type JournalItem } from './journal.ts';
 
 export type AcpBrainItem =
   | { kind: 'inbound'; inbound: string; history: string }
-  | { kind: 'patrol'; channels: Array<{ chatId: string; history: string }> };
+  | { kind: 'patrol'; channels: Array<{ chatId: string; history: string }> }
+  | JournalItem;
 
 export type AcpBrainOptions = {
   command: string;
@@ -22,6 +24,8 @@ export type AcpBrainOptions = {
 
 export type AcpBrain = {
   enqueue(item: AcpBrainItem): void;
+  close(): void;
+  drain(timeoutMs: number): Promise<boolean>;
   hasPendingPatrol(): boolean;
   requestModel(modelId: string): Promise<string>;
   getModels(): { current?: string; available: string[] };
@@ -36,6 +40,8 @@ const STABLE_UPTIME_MS = 60_000;
 
 const PROMPT_FOOTER =
   '指示書の手順に従って判断し、返すなら tool.ts で返す。返さないなら何もしない。この会話への最終回答は 1 行でよい。';
+const JOURNAL_PROMPT_FOOTER =
+  '指示書の『日誌』の節に従って要約し、tool.ts write_journal で書く。Discord には何も送らない。最終回答は 1 行でよい。';
 
 /** `take.ts` と同じ形式で ACP エージェント向けプロンプト本文を組み立てる */
 export function formatAcpPrompt(
@@ -44,6 +50,7 @@ export function formatAcpPrompt(
   includeIntro: boolean,
 ): string {
   let body: string;
+  let footer = PROMPT_FOOTER;
   if (item.kind === 'patrol') {
     const lines = ['=== patrol ==='];
     for (const ch of item.channels) {
@@ -51,6 +58,9 @@ export function formatAcpPrompt(
       lines.push(ch.history);
     }
     body = lines.join('\n');
+  } else if (item.kind === 'journal') {
+    body = formatJournalBody(item);
+    footer = JOURNAL_PROMPT_FOOTER;
   } else {
     body = [
       '=== inbound ===',
@@ -65,7 +75,7 @@ export function formatAcpPrompt(
     parts.push(`最初に ${instructionsPath} を読み、ACP モードの節に従うこと。`);
   }
   parts.push(body);
-  parts.push(PROMPT_FOOTER);
+  parts.push(footer);
   return parts.join('\n\n');
 }
 
@@ -85,6 +95,7 @@ export function createAcpBrain(opts: AcpBrainOptions): AcpBrain {
 
   const queue: AcpBrainItem[] = [];
   let stopped = false;
+  let closed = false;
   let activeClient: AcpClient | undefined;
   let clientReady = false;
   let inTurn = false;
@@ -99,6 +110,17 @@ export function createAcpBrain(opts: AcpBrainOptions): AcpBrain {
     | undefined;
   let wakeupResolve: (() => void) | undefined;
   let sleepCancel: (() => void) | undefined;
+  const drainWaiters = new Set<() => void>();
+
+  function isIdle(): boolean {
+    return queue.length === 0 && !inTurn && !pendingModelOp;
+  }
+
+  function notifyDrainWaiters(): void {
+    for (const notify of Array.from(drainWaiters)) {
+      notify();
+    }
+  }
 
   function wake(): void {
     if (wakeupResolve) {
@@ -248,6 +270,7 @@ export function createAcpBrain(opts: AcpBrainOptions): AcpBrain {
       }
 
       if (queue.length === 0) {
+        notifyDrainWaiters();
         await waitForSignal();
         if (clientExited && Date.now() - startedAt >= STABLE_UPTIME_MS) {
           crashCount = 0;
@@ -334,13 +357,45 @@ export function createAcpBrain(opts: AcpBrainOptions): AcpBrain {
 
   return {
     enqueue(item: AcpBrainItem): void {
-      if (stopped) return;
+      if (stopped || closed) return;
       if (queue.length >= maxQueueSize) {
         const dropped = queue.shift();
         log(`警告: ACP キュー上限 (${maxQueueSize}) に達したため古いアイテム (${dropped?.kind ?? 'unknown'}) を破棄します`);
       }
       queue.push(item);
       wake();
+    },
+
+    close(): void {
+      closed = true;
+    },
+
+    drain(timeoutMs: number): Promise<boolean> {
+      if (stopped) return Promise.resolve(false);
+      if (isIdle()) return Promise.resolve(true);
+      if (timeoutMs <= 0) return Promise.resolve(false);
+
+      return new Promise<boolean>((resolve) => {
+        let settled = false;
+        const finish = (ok: boolean) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          drainWaiters.delete(onNotify);
+          resolve(ok);
+        };
+        const onNotify = () => {
+          if (stopped) {
+            finish(false);
+          } else if (isIdle()) {
+            finish(true);
+          }
+        };
+        const timer = setTimeout(() => {
+          finish(false);
+        }, timeoutMs);
+        drainWaiters.add(onNotify);
+      });
     },
 
     hasPendingPatrol(): boolean {
@@ -391,6 +446,7 @@ export function createAcpBrain(opts: AcpBrainOptions): AcpBrain {
     async stop(): Promise<void> {
       if (!stopped) {
         stopped = true;
+        closed = true;
         clientReady = false;
         if (pendingModelOp) {
           pendingModelOp.reject(new Error('AcpBrain が停止されました'));
@@ -401,6 +457,7 @@ export function createAcpBrain(opts: AcpBrainOptions): AcpBrain {
         const stopWait = current?.stop();
         sleepCancel?.();
         wake();
+        notifyDrainWaiters();
         await stopWait;
       }
       await loopPromise;

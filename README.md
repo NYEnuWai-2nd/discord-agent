@@ -102,6 +102,18 @@ bot の人格やスキル・ルールはリポジトリ本体ではなく、環�
 | `BOT_ACP_INSTRUCTIONS` | 任意 | `<repo>/GEMINI_BRAIN.md` | 新規セッションの最初に読ませる指示書の絶対パス |
 | `BOT_ACP_PROMPT_TIMEOUT_SEC` | 任意 | `300` | 1 ターンのタイムアウト秒数（超えたら `session/cancel`） |
 | `BOT_ACP_MAX_TURNS` | 任意 | `200` | セッションを作り直すまでのターン数 |
+| `BOT_JOURNAL_TIME` | 任意 | `23:55` | `webhook` / `acp` モードで日誌を書く毎日の時刻（`HH:MM`、JST）。空文字で無効 |
+| `BOT_JOURNAL_ON_EXIT` | 任意 | `1` | `acp` モードの終了時（SIGINT / SIGTERM）に日誌を書いてから終了するか（`0` で無効） |
+| `BOT_JOURNAL_EXIT_TIMEOUT_SEC` | 任意 | `120` | 終了時の日誌を待つ最大秒数 |
+
+---
+
+## 日誌機能（webhook / acp モード）
+
+`BOT_BRAIN=webhook` または `BOT_BRAIN=acp` のとき、巡回対象チャンネル（`patrolChannels`、未設定時は `channels` 全体）の直近発言をまとめ、`{workspace}/Context/日誌/YYYY-MM-DD.md` へ `write_journal` ツールで記録します（`BOT_BRAIN=claude` では無効）。
+
+- **毎日の定時日誌（`BOT_JOURNAL_TIME`）**: 既定 `23:55`（JST）。前回記録時刻（`{stateDir}/journal-last.json` の `at`、無ければ当日の JST 0 時）以降の新規発言がある場合のみ日誌依頼を出します。スリープ等で定時を過ぎた場合、1 時間以内であれば復帰時に実行し、1 時間超遅れた場合はその日を飛ばします。空文字を指定すると無効になります。
+- **終了時日誌（`BOT_BRAIN=acp` のみ、`BOT_JOURNAL_ON_EXIT`）**: `1`（既定）のとき、SIGINT / SIGTERM 受信時に巡回・新規受信を止めた上で終了前日誌をキューへ入れ、処理完了まで最大 `BOT_JOURNAL_EXIT_TIMEOUT_SEC` 秒（既定 `120`）待機してから終了します（新規発言が 0 件なら待たずに終了、待機中に再度シグナルを送ると即終了）。
 
 ---
 

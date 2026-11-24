@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { BotConfig } from './config.ts';
 import type { DiscordTools } from './discord.ts';
 import { toolShapes } from './tool-schemas.ts';
-import { addPerson, notePerson, setState } from './workspace-tools.ts';
+import { addPerson, notePerson, setState, writeJournal } from './workspace-tools.ts';
 
 export type ModelControl = {
   requestModel(modelId: string): Promise<string>;
@@ -116,6 +116,10 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
       throw new Error('切り替え権限がありません');
     }
     return ctx.modelControl.requestModel(args.model);
+  }),
+  write_journal: makeHandler(z.object(toolShapes.write_journal), (ctx, args) => {
+    const workspace = requireWorkspace(ctx);
+    return writeJournal({ workspace }, args);
   }),
 };
 

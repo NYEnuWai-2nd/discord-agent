@@ -64,4 +64,8 @@ export const toolShapes = {
     message_id: z.string().describe('Discord message ID instructing the model change'),
     model: z.string().describe('Target model ID to switch to'),
   },
+  write_journal: {
+    text: z.string().describe('Journal entry body (1 to 6000 chars)'),
+    date: z.string().optional().describe('Optional date in YYYY-MM-DD (JST, default: today)'),
+  },
 };

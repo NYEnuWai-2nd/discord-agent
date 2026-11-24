@@ -151,12 +151,44 @@ type InitializeResult = {
 type SessionNewResult = {
   sessionId: string;
   models?: AcpModelsState;
+  configOptions?: unknown;
 };
 
 type SessionResumeOrLoadResult = {
   sessionId?: string;
   models?: AcpModelsState;
+  configOptions?: unknown;
 };
+
+/**
+ * ACP の session config options（例: OpenCode）からモデル選択肢を取り出す。
+ * category が "model"（無ければ id が "model"）の select 型を探し、グループ化された選択肢も平らにする。
+ */
+export function modelsFromConfigOptions(
+  configOptions: unknown,
+): { configId: string; available: string[]; current?: string } | undefined {
+  if (!Array.isArray(configOptions)) return undefined;
+  const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+  const opt =
+    configOptions.find((o) => isObj(o) && o.category === 'model' && o.type === 'select') ??
+    configOptions.find((o) => isObj(o) && o.id === 'model' && o.type === 'select');
+  if (!isObj(opt) || typeof opt.id !== 'string') return undefined;
+  const available: string[] = [];
+  const collect = (items: unknown): void => {
+    if (!Array.isArray(items)) return;
+    for (const it of items) {
+      if (!isObj(it)) continue;
+      if (typeof it.value === 'string' && it.value) available.push(it.value);
+      else if (Array.isArray(it.options)) collect(it.options);
+    }
+  };
+  collect(opt.options);
+  return {
+    configId: opt.id,
+    available,
+    ...(typeof opt.currentValue === 'string' && opt.currentValue ? { current: opt.currentValue } : {}),
+  };
+}
 
 type PermissionOption = {
   optionId: string;
@@ -248,6 +280,8 @@ export class AcpClient {
   private usedTokens: number | undefined;
   private availableModels: string[] = [];
   private currentModelId: string | undefined;
+  /** モデルを session config option で切り替えるエージェントの場合、その configId */
+  private modelConfigId: string | undefined;
   private exited = false;
   private stopping = false;
   private promptInFlight = false;
@@ -316,6 +350,7 @@ export class AcpClient {
 
     const savedId = this.fresh ? undefined : loadAcpSessionId(this.stateDir);
     let models: AcpModelsState | undefined;
+    let configOptions: unknown;
 
     if (savedId && (supportsResume || supportsLoad)) {
       const method = supportsResume ? 'session/resume' : 'session/load';
@@ -329,6 +364,7 @@ export class AcpClient {
         this.sessionId = typeof resumed?.sessionId === 'string' && resumed.sessionId ? resumed.sessionId : savedId;
         this.isNewSession = false;
         models = resumed?.models;
+        configOptions = resumed?.configOptions;
         this.log(`ACP セッション再開 (${method}): ${this.sessionId}`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -349,6 +385,7 @@ export class AcpClient {
       this.sessionId = created.sessionId;
       this.isNewSession = true;
       models = created.models;
+      configOptions = created.configOptions;
       saveAcpSessionId(this.stateDir, this.sessionId);
       this.log(`ACP セッション新規作成: ${this.sessionId}`);
     }
@@ -362,8 +399,17 @@ export class AcpClient {
       typeof models?.currentModelId === 'string' && models.currentModelId.length > 0
         ? models.currentModelId
         : undefined;
+    this.modelConfigId = undefined;
+    if (this.availableModels.length === 0) {
+      const fromConfig = modelsFromConfigOptions(configOptions);
+      if (fromConfig) {
+        this.modelConfigId = fromConfig.configId;
+        this.availableModels = fromConfig.available;
+        this.currentModelId = fromConfig.current;
+      }
+    }
 
-    if (this.model && models?.availableModels) {
+    if (this.model && this.availableModels.length > 0) {
       const available = this.availableModels.includes(this.model);
       if (available) {
         try {
@@ -371,7 +417,7 @@ export class AcpClient {
           this.log(`ACP モデル設定: ${this.model}`);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          this.log(`警告: session/set_model (${this.model}) に失敗しました: ${msg}`);
+          this.log(`警告: モデル設定 (${this.model}) に失敗しました: ${msg}`);
         }
       } else {
         this.log(`警告: 指定モデル "${this.model}" は availableModels に含まれていません`);
@@ -389,10 +435,18 @@ export class AcpClient {
     if (!this.sessionId || this.exited || !this.proc) {
       throw new Error('ACP セッションが開始されていません');
     }
-    await this.request('session/set_model', {
-      sessionId: this.sessionId,
-      modelId,
-    });
+    if (this.modelConfigId) {
+      await this.request('session/set_config_option', {
+        sessionId: this.sessionId,
+        configId: this.modelConfigId,
+        value: modelId,
+      });
+    } else {
+      await this.request('session/set_model', {
+        sessionId: this.sessionId,
+        modelId,
+      });
+    }
     this.currentModelId = modelId;
   }
 

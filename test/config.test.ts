@@ -391,6 +391,63 @@ describe('loadEnv', () => {
       ).toThrow(/BOT_PATROL_MINUTES/)
     }
   })
+
+  test('BOT_JOURNAL_* の既定値・無効化・不正値エラーを検証する', () => {
+    const workspaceDir = makeTempDir('discord-agent-ws-')
+
+    const defaults = loadEnv({ DISCORD_BOT_TOKEN: 'tok', BOT_WORKSPACE: workspaceDir })
+    expect(defaults.journalTime).toBe('23:55')
+    expect(defaults.journalOnExit).toBe(true)
+    expect(defaults.journalExitTimeoutSec).toBe(120)
+
+    const disabled = loadEnv({
+      DISCORD_BOT_TOKEN: 'tok',
+      BOT_WORKSPACE: workspaceDir,
+      BOT_JOURNAL_TIME: '',
+      BOT_JOURNAL_ON_EXIT: '0',
+      BOT_JOURNAL_EXIT_TIMEOUT_SEC: '45',
+    })
+    expect(disabled.journalTime).toBeUndefined()
+    expect(disabled.journalOnExit).toBe(false)
+    expect(disabled.journalExitTimeoutSec).toBe(45)
+
+    const custom = loadEnv({
+      DISCORD_BOT_TOKEN: 'tok',
+      BOT_WORKSPACE: workspaceDir,
+      BOT_JOURNAL_TIME: '09:30',
+      BOT_JOURNAL_ON_EXIT: '1',
+    })
+    expect(custom.journalTime).toBe('09:30')
+    expect(custom.journalOnExit).toBe(true)
+
+    for (const badTime of ['25:00', '23:60', '9:00', 'noon']) {
+      expect(() =>
+        loadEnv({
+          DISCORD_BOT_TOKEN: 'tok',
+          BOT_WORKSPACE: workspaceDir,
+          BOT_JOURNAL_TIME: badTime,
+        }),
+      ).toThrow(/BOT_JOURNAL_TIME/)
+    }
+
+    expect(() =>
+      loadEnv({
+        DISCORD_BOT_TOKEN: 'tok',
+        BOT_WORKSPACE: workspaceDir,
+        BOT_JOURNAL_ON_EXIT: 'yes',
+      }),
+    ).toThrow(/BOT_JOURNAL_ON_EXIT/)
+
+    for (const badSec of ['0', '-5', 'abc']) {
+      expect(() =>
+        loadEnv({
+          DISCORD_BOT_TOKEN: 'tok',
+          BOT_WORKSPACE: workspaceDir,
+          BOT_JOURNAL_EXIT_TIMEOUT_SEC: badSec,
+        }),
+      ).toThrow(/BOT_JOURNAL_EXIT_TIMEOUT_SEC/)
+    }
+  })
 })
 
 describe('resolveBrainKind / loadAcpEnv', () => {
