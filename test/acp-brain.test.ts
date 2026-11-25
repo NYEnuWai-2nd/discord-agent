@@ -217,6 +217,40 @@ describe('createAcpBrain', () => {
     }
   });
 
+  test('warmup 指定時は新規セッション直後に準備ターンを送り、最初の件には案内を付けない', async () => {
+    const dir = makeTempDir();
+    const stateDir = path.join(dir, 'state');
+    const logFile = path.join(dir, 'fake.jsonl');
+    process.env.FAKE_ACP_LOG_FILE = logFile;
+    const logs: string[] = [];
+    let turnEnds = 0;
+    const brain = createAcpBrain({
+      command: `bun "${FIXTURE_PATH}"`,
+      cwd: dir,
+      stateDir,
+      instructionsPath: 'C:/repo/GEMINI_BRAIN.md',
+      warmup: true,
+      log: (m) => logs.push(m),
+      onTurnEnd: () => {
+        turnEnds += 1;
+      },
+    });
+    try {
+      await waitFor(() => logs.some((m) => m.startsWith('ACP 準備完了')));
+      brain.enqueue({ kind: 'inbound', inbound: 'msg-1', history: 'h1' });
+      await waitFor(() => turnEnds === 1);
+      const prompts = readFakeLog(logFile)
+        .filter((e) => e.kind === 'received' && e.msg.method === 'session/prompt')
+        .map((e) => e.msg.params?.prompt?.[0]?.text ?? '');
+      expect(prompts.length).toBe(2);
+      expect(prompts[0]).toContain('準備: まず C:/repo/GEMINI_BRAIN.md を読み');
+      expect(prompts[1]).toContain('msg-1');
+      expect(prompts[1]).not.toContain('最初に C:/repo/GEMINI_BRAIN.md を読み');
+    } finally {
+      await brain.stop();
+    }
+  });
+
   test('maxTurns 到達でセッションを破棄して新規作成する', async () => {
     const dir = makeTempDir();
     const stateDir = path.join(dir, 'state');

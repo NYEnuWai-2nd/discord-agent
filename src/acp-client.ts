@@ -523,7 +523,7 @@ export class AcpClient {
       if (promptTimer !== undefined) clearTimeout(promptTimer);
       if (cancelTimer !== undefined) clearTimeout(cancelTimer);
       this.promptInFlight = false;
-      const tail = this.turnOutput.slice(-200).replace(/\r?\n/g, ' ').trim();
+      const tail = this.turnOutput.slice(-400).replace(/\r?\n/g, ' ').trim();
       if (tail) {
         this.log(`[acp response] ${tail}`);
       }

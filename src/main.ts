@@ -333,6 +333,7 @@ async function main(): Promise<void> {
         model: acpEnv.model,
         instructionsPath: acpEnv.instructionsPath,
         stateFilePath: existsSync(join(env.workspace, '現在の状態.md')) ? join(env.workspace, '現在の状態.md') : undefined,
+        warmup: true,
         promptTimeoutSec: acpEnv.promptTimeoutSec,
         maxTurns: acpEnv.maxTurns,
         fresh: env.fresh,

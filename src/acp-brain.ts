@@ -29,6 +29,8 @@ export type AcpBrainOptions = {
   maxQueueSize?: number;
   log?: (msg: string) => void;
   onTurnEnd?: () => void;
+  /** 新しいセッションを作った直後に、指示書を読ませる準備ターンを 1 回送る */
+  warmup?: boolean;
 };
 
 export type AcpBrain = {
@@ -150,6 +152,18 @@ export function formatAcpPrompt(
   return parts.join('\n\n');
 }
 
+/** 新しいセッション直後の準備ターンで送る文 */
+export function formatWarmupPrompt(instructionsPath: string, stateContent?: string): string {
+  const parts = [
+    `準備: まず ${instructionsPath} を読み、ACP モードの節に従う準備をすること。指示書が最初に読むよう求めているファイル（CLAUDE.md、現在のペルソナなど）もここで読んでおく。現在の状態は下に添付しており、以後も各発言の先頭に添付されるので、現在の状態.md を読み直す必要はない。`,
+  ];
+  if (stateContent !== undefined) {
+    parts.push(`=== 現在の状態（bot が添付。読み直し不要） ===\n${stateContent.replace(/(?:\r?\n)+$/, '')}`);
+  }
+  parts.push('Discord には何も送らない。最終回答は「準備完了」の 1 行だけ。');
+  return parts.join('\n\n');
+}
+
 /**
  * 1 つの ACP セッションを維持しながら受信・巡回アイテムを直列処理する頭脳を起動する。
  * 子プロセス終了時はバックオフ付きで自動再起動し、その間の着信はキューに保持する。
@@ -244,6 +258,7 @@ export function createAcpBrain(opts: AcpBrainOptions): AcpBrain {
     let clientExited = false;
     let startedAt = 0;
     let needsIntro = false;
+    let warmupPending = false;
     let turnsInSession = 0;
 
     while (!stopped) {
@@ -322,6 +337,7 @@ export function createAcpBrain(opts: AcpBrainOptions): AcpBrain {
           }
           clientReady = true;
           needsIntro = startRes.isNewSession;
+          warmupPending = startRes.isNewSession && opts.warmup === true;
           turnsInSession = 0;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -353,6 +369,25 @@ export function createAcpBrain(opts: AcpBrainOptions): AcpBrain {
           }
         } catch (err) {
           op.reject(err instanceof Error ? err : new Error(String(err)));
+        }
+        continue;
+      }
+
+      if (warmupPending && !stopped) {
+        warmupPending = false;
+        inTurn = true;
+        const warmStartMs = Date.now();
+        try {
+          const res = await activeClient.prompt(formatWarmupPrompt(opts.instructionsPath, readStateFile()));
+          turnsInSession += 1;
+          needsIntro = false;
+          const sec = Math.max(0, (Date.now() - warmStartMs) / 1000).toFixed(1);
+          log(`ACP 準備完了: ${sec} 秒 stopReason=${res.stopReason}`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log(`警告: ACP 準備ターンに失敗しました（最初の件に指示を添えます）: ${msg}`);
+        } finally {
+          inTurn = false;
         }
         continue;
       }
