@@ -1,7 +1,7 @@
 # discord-agent
 
 `discord.js` を使って単体で動作する Discord ボットです。
-2 つの頭脳モード（Claude Agent SDK による自律セッション / webhook + 外部エージェント連携）に対応し、チャンネル・メンバー単位のアクセス制御、メッセージ分割送信、添付ファイルのダウンロード・送信、履歴取得などの機能を備えています。
+3 つの頭脳モード（Claude Agent SDK による自律セッション / webhook + 外部エージェント連携 / ACP）に対応し、チャンネル・メンバー単位のアクセス制御、メッセージ分割送信、添付ファイルのダウンロード・送信、履歴取得などの機能を備えています。
 
 bot の人格やスキル・ルールはリポジトリ本体ではなく、環境変数 `BOT_WORKSPACE` で指定する任意のワークスペースディレクトリに配置します。
 
@@ -21,6 +21,7 @@ bot の人格やスキル・ルールはリポジトリ本体ではなく、環�
 - Discord Bot トークン（[Discord Developer Portal](https://discord.com/developers/applications) で発行し、**MESSAGE CONTENT INTENT** を有効化）
 - ワークスペース用ディレクトリ（空でも可。`CLAUDE.md` や `.claude/skills/` を置くと `claude` モードで自動読込されます）
 - `claude` モードを使う場合: Claude Agent SDK が利用できる認証環境（Claude Code のログイン済み環境や `ANTHROPIC_API_KEY` など）
+- `ACP` モードを使う場合: ACP が利用できるサービス（Claude Code, Codex, Antigravity, OpenCode等）
 
 ---
 
